@@ -1,0 +1,215 @@
+<!doctype html>
+<html lang="ru">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>Поиск по файлам</title>
+<style>
+  :root {
+    --bg: #f6f7f9; --card: #ffffff; --text: #1c1f24; --muted: #667085; --line: #e3e6eb;
+    --accent: #2f6fed; --accent-soft: #e8f0ff; --mark: #fff0a8; --mark-text: #3a2e00;
+    --word: #2b579a; --excel: #1e7145; --ppt: #c2410c; --pdf: #b91c1c; --other: #667085;
+    --shadow: 0 1px 2px rgba(16,24,40,.06), 0 1px 3px rgba(16,24,40,.08);
+  }
+  @media (prefers-color-scheme: dark) {
+    :root {
+      --bg: #101216; --card: #181b21; --text: #e6e8ec; --muted: #98a2b3; --line: #2a2f38;
+      --accent: #7aa2ff; --accent-soft: #1b2740; --mark: #5c4a00; --mark-text: #fff3c4;
+      --word: #7ea6e8; --excel: #5cc98d; --ppt: #f59e6b; --pdf: #f28b8b; --other: #98a2b3;
+      --shadow: none;
+    }
+  }
+  * { box-sizing: border-box; }
+  body { margin: 0; background: var(--bg); color: var(--text); font: 15px/1.5 system-ui, -apple-system, "Segoe UI", Roboto, sans-serif; }
+  .wrap { max-width: 920px; margin: 0 auto; padding: 24px 16px 64px; }
+  h1 { font-size: 20px; margin: 0 0 14px; font-weight: 650; }
+  .search { display: flex; gap: 8px; }
+  .search input[type=search] {
+    flex: 1; font: inherit; font-size: 17px; padding: 12px 14px; border-radius: 10px;
+    border: 1px solid var(--line); background: var(--card); color: var(--text); box-shadow: var(--shadow); outline: none;
+  }
+  .search input:focus { border-color: var(--accent); box-shadow: 0 0 0 3px var(--accent-soft); }
+  .filters { display: flex; flex-wrap: wrap; gap: 8px 14px; align-items: center; margin: 12px 0 4px; }
+  .chips { display: flex; flex-wrap: wrap; gap: 6px; }
+  .chip {
+    border: 1px solid var(--line); background: var(--card); color: var(--text); border-radius: 999px;
+    padding: 4px 12px; font: inherit; font-size: 13px; cursor: pointer;
+  }
+  .chip[aria-pressed=true] { background: var(--accent-soft); border-color: var(--accent); color: var(--accent); }
+  select { font: inherit; font-size: 13px; padding: 4px 8px; border-radius: 8px; border: 1px solid var(--line); background: var(--card); color: var(--text); }
+  .meta { color: var(--muted); font-size: 13px; margin: 14px 2px 8px; min-height: 20px; }
+  .hit { background: var(--card); border: 1px solid var(--line); border-radius: 10px; padding: 12px 14px; margin-bottom: 10px; box-shadow: var(--shadow); }
+  .top { display: flex; align-items: baseline; gap: 10px; flex-wrap: wrap; }
+  .badge { font-size: 11px; font-weight: 700; letter-spacing: .03em; padding: 2px 7px; border-radius: 6px; color: #fff; text-transform: uppercase; }
+  .badge.word { background: var(--word); } .badge.excel { background: var(--excel); }
+  .badge.ppt { background: var(--ppt); } .badge.pdf { background: var(--pdf); } .badge.other { background: var(--other); }
+  .name { font-weight: 600; font-size: 16px; word-break: break-word; }
+  .info { color: var(--muted); font-size: 12.5px; margin-left: auto; white-space: nowrap; }
+  .path { color: var(--muted); font-size: 12.5px; margin-top: 2px; word-break: break-all; display: flex; gap: 10px; align-items: baseline; }
+  .path span { flex: 1; }
+  .actions { display: flex; gap: 6px; }
+  .actions button { font: inherit; font-size: 12px; padding: 2px 9px; border-radius: 6px; border: 1px solid var(--line); background: transparent; color: var(--accent); cursor: pointer; }
+  .actions button:hover { background: var(--accent-soft); }
+  .snippet { margin-top: 8px; font-size: 14px; word-break: break-word; }
+  .loc { display: inline-block; font-size: 12px; color: var(--excel); border: 1px solid var(--line); border-radius: 6px; padding: 0 6px; margin-right: 6px; }
+  .warn { margin-top: 6px; font-size: 12.5px; color: var(--ppt); }
+  mark { background: var(--mark); color: var(--mark-text); border-radius: 3px; padding: 0 1px; }
+  .more { display: block; margin: 14px auto; font: inherit; padding: 8px 20px; border-radius: 8px; border: 1px solid var(--line); background: var(--card); color: var(--text); cursor: pointer; }
+  .more[hidden] { display: none; }
+  .help { color: var(--muted); font-size: 14px; }
+  .help code { background: var(--accent-soft); color: var(--accent); padding: 1px 6px; border-radius: 5px; font-size: 13px; }
+  .help ul { padding-left: 18px; } .help li { margin: 4px 0; }
+  .error { color: var(--pdf); }
+  @media (max-width: 560px) {
+    .path { flex-direction: column; gap: 6px; }
+    .info { margin-left: 0; white-space: normal; flex-basis: 100%; }
+  }
+  .toast { position: fixed; left: 50%; bottom: 20px; transform: translateX(-50%); background: var(--text); color: var(--bg); padding: 8px 14px; border-radius: 8px; font-size: 13px; opacity: 0; transition: opacity .2s; pointer-events: none; }
+  .toast.show { opacity: .95; }
+</style>
+</head>
+<body>
+<div class="wrap">
+  <h1>Поиск по файлам</h1>
+  <div class="search"><input id="q" type="search" placeholder="Имя файла или слова из содержимого…" autofocus autocomplete="off" spellcheck="false"></div>
+  <div class="filters">
+    <div class="chips" id="chips"></div>
+    <select id="mode" title="Где искать">
+      <option value="all">Везде</option><option value="name">Только имена</option><option value="content">Только содержимое</option>
+    </select>
+    <select id="sort" title="Порядок">
+      <option value="relevance">По релевантности</option><option value="newest">Сначала новые</option>
+      <option value="oldest">Сначала старые</option><option value="largest">Сначала большие</option><option value="smallest">Сначала маленькие</option>
+    </select>
+  </div>
+  <div class="meta" id="meta"></div>
+  <div id="results"></div>
+  <button class="more" id="more" hidden>Показать ещё</button>
+</div>
+<div class="toast" id="toast"></div>
+<script>
+'use strict';
+const TOKEN = '__TOKEN__';
+const GROUPS = [
+  { id: 'word', label: 'Word', exts: 'doc,docx,docm,dot,dotx,dotm,odt,rtf' },
+  { id: 'excel', label: 'Excel', exts: 'xls,xlsx,xlsm,xlsb,xlt,xltx,xltm,ods,csv' },
+  { id: 'ppt', label: 'PowerPoint', exts: 'ppt,pptx,pptm,pps,ppsx,pot,potx,odp' },
+  { id: 'pdf', label: 'PDF', exts: 'pdf' },
+  { id: 'text', label: 'Текст', exts: 'txt,md,log,json,xml,html,htm,yaml,yml,ini,cfg' },
+];
+const groupOf = ext => (GROUPS.find(g => g.exts.split(',').includes(ext)) || { id: 'other' }).id;
+const $ = id => document.getElementById(id);
+const state = { groups: new Set(), offset: 0, total: 0, seq: 0, timer: null };
+
+const el = (tag, cls, text) => { const e = document.createElement(tag); if (cls) e.className = cls; if (text != null) e.textContent = text; return e; };
+function fmtSize(b) {
+  if (b < 1024) return b + ' Б';
+  const u = ['КБ', 'МБ', 'ГБ', 'ТБ']; let i = -1;
+  do { b /= 1024; i++; } while (b >= 1024 && i < u.length - 1);
+  return b.toFixed(1).replace('.', ',') + ' ' + u[i];
+}
+const fmtDate = ms => new Date(ms).toLocaleString('ru-RU', { dateStyle: 'short', timeStyle: 'short' });
+function toast(text) { const t = $('toast'); t.textContent = text; t.classList.add('show'); clearTimeout(t._h); t._h = setTimeout(() => t.classList.remove('show'), 2200); }
+
+function buildChips() {
+  const box = $('chips');
+  for (const g of GROUPS) {
+    const b = el('button', 'chip', g.label);
+    b.type = 'button'; b.setAttribute('aria-pressed', 'false');
+    b.onclick = () => {
+      state.groups.has(g.id) ? state.groups.delete(g.id) : state.groups.add(g.id);
+      b.setAttribute('aria-pressed', state.groups.has(g.id));
+      schedule(0);
+    };
+    box.appendChild(b);
+  }
+}
+
+function params(offset) {
+  const p = new URLSearchParams();
+  p.set('q', $('q').value.trim());
+  const exts = GROUPS.filter(g => state.groups.has(g.id)).map(g => g.exts).join(',');
+  if (exts) p.set('ext', exts);
+  p.set('mode', $('mode').value); p.set('sort', $('sort').value);
+  p.set('limit', '20'); p.set('offset', String(offset));
+  return p;
+}
+
+function renderHit(h) {
+  const box = el('div', 'hit');
+  const top = el('div', 'top');
+  top.append(el('span', 'badge ' + groupOf(h.ext), h.ext || 'файл'), el('span', 'name', h.name),
+             el('span', 'info', fmtSize(h.size) + ' · ' + fmtDate(h.modified_ms)));
+  const path = el('div', 'path');
+  path.appendChild(el('span', null, h.path));
+  const actions = el('div', 'actions');
+  const open = el('button', null, 'Открыть'); open.onclick = () => act(h.path, 'open');
+  const reveal = el('button', null, 'В папке'); reveal.onclick = () => act(h.path, 'reveal');
+  const copy = el('button', null, 'Путь'); copy.onclick = () => { navigator.clipboard?.writeText(h.path).then(() => toast('Путь скопирован')); };
+  actions.append(open, reveal, copy); path.appendChild(actions);
+  box.append(top, path);
+  if (h.status === 'encrypted') box.appendChild(el('div', 'warn', 'Файл защищён паролем — найден только по имени'));
+  if (h.snippet) {
+    const s = el('div', 'snippet');
+    if (h.location) s.appendChild(el('span', 'loc', h.location));
+    if (h.snippet.more_before) s.append('… ');
+    for (const part of h.snippet.parts) s.appendChild(part.hit ? el('mark', null, part.text) : document.createTextNode(part.text));
+    if (h.snippet.more_after) s.append(' …');
+    box.appendChild(s);
+  }
+  return box;
+}
+
+async function act(path, action) {
+  try {
+    const r = await fetch('/api/open?' + new URLSearchParams({ path, action }), { method: 'POST', headers: { 'X-Token': TOKEN } });
+    const j = await r.json();
+    if (!r.ok) toast(j.error || 'Не удалось выполнить действие');
+  } catch (e) { toast('Нет связи с сервером'); }
+}
+
+function showHelp(results) {
+  results.replaceChildren();
+  const h = el('div', 'help');
+  h.innerHTML = '<p>Ищет по именам файлов и по содержимому: Word, Excel, PowerPoint, PDF, текстовые файлы. Учитывает словоформы («договор» найдёт «договоров»).</p>' +
+    '<ul><li><code>договор аренды</code> — оба слова</li><li><code>"срок действия"</code> — точная фраза</li>' +
+    '<li><code>отчёт -черновик</code> — исключить слово</li><li><code>догов*</code> — начало слова</li>' +
+    '<li><code>аренда~</code> — с опечатками</li><li><code>аренда OR лизинг</code> — любое из слов</li>' +
+    '<li><code>name:смета</code> — только в имени, <code>content:смета</code> — только в тексте</li>' +
+    '<li><code>ext:docx,xlsx</code> — только эти типы</li></ul>';
+  results.appendChild(h);
+}
+
+async function search(append) {
+  const my = ++state.seq;
+  const q = $('q').value.trim();
+  const hasFilter = state.groups.size > 0;
+  const results = $('results'), meta = $('meta'), more = $('more');
+  if (!q && !hasFilter) { state.offset = 0; meta.textContent = ''; more.hidden = true; showHelp(results); return; }
+  if (!append) state.offset = 0;
+  try {
+    const r = await fetch('/api/search?' + params(state.offset));
+    const j = await r.json();
+    if (my !== state.seq) return;
+    if (!r.ok) { meta.textContent = ''; results.replaceChildren(el('div', 'help error', j.error || 'Ошибка поиска')); more.hidden = true; return; }
+    if (!append) results.replaceChildren();
+    for (const h of j.hits) results.appendChild(renderHit(h));
+    state.total = j.total; state.offset += j.hits.length;
+    meta.textContent = j.total ? `Найдено файлов: ${j.total} · ${Math.max(1, Math.round(j.took))} мс` : 'Ничего не найдено';
+    more.hidden = state.offset >= j.total;
+  } catch (e) { if (my === state.seq) meta.textContent = 'Нет связи с сервером'; }
+}
+
+function schedule(delay = 200) { clearTimeout(state.timer); state.timer = setTimeout(() => search(false), delay); }
+
+buildChips();
+$('q').addEventListener('input', () => schedule());
+$('mode').onchange = () => schedule(0);
+$('sort').onchange = () => schedule(0);
+$('more').onclick = () => search(true);
+document.addEventListener('keydown', e => { if (e.key === '/' && document.activeElement !== $('q')) { e.preventDefault(); $('q').focus(); } });
+fetch('/api/stats').then(r => r.json()).then(s => { if (!$('q').value) $('meta').textContent = `В индексе файлов: ${s.documents}`; }).catch(() => {});
+showHelp($('results'));
+</script>
+</body>
+</html>

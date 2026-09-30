@@ -166,9 +166,8 @@ fn core_meta(pkg: &mut Pkg, out: &mut Doc) {
 }
 
 /// Определяет тип пакета по главной части и извлекает текст.
-pub fn extract(path: &Path, out: &mut Doc) -> Result<()> {
-    let mut pkg = Pkg::open(path)?;
-    let main = match main_part(&mut pkg) {
+pub fn extract_pkg(pkg: &mut Pkg, out: &mut Doc) -> Result<()> {
+    let main = match main_part(pkg) {
         Some(m) => m,
         // Нет корневых связей — пробуем угадать по стандартным именам.
         None => ["word/document.xml", "xl/workbook.xml", "ppt/presentation.xml"]
@@ -177,14 +176,14 @@ pub fn extract(path: &Path, out: &mut Doc) -> Result<()> {
             .map(str::to_string)
             .context("не найдена главная часть документа")?,
     };
-    core_meta(&mut pkg, out);
+    core_meta(pkg, out);
     match dir_of(&main) {
-        "word" => docx(&mut pkg, &main, out),
-        "xl" => xlsx(&mut pkg, &main, out),
-        "ppt" => pptx(&mut pkg, &main, out),
-        _ if main.ends_with("workbook.xml") => xlsx(&mut pkg, &main, out),
-        _ if main.ends_with("presentation.xml") => pptx(&mut pkg, &main, out),
-        _ => docx(&mut pkg, &main, out),
+        "word" => docx(pkg, &main, out),
+        "xl" => xlsx(pkg, &main, out),
+        "ppt" => pptx(pkg, &main, out),
+        _ if main.ends_with("workbook.xml") => xlsx(pkg, &main, out),
+        _ if main.ends_with("presentation.xml") => pptx(pkg, &main, out),
+        _ => docx(pkg, &main, out),
     }
 }
 

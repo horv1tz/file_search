@@ -7,7 +7,7 @@ use std::sync::atomic::{AtomicBool, AtomicU64, AtomicUsize, Ordering};
 use std::time::{Duration, Instant, UNIX_EPOCH};
 
 use anyhow::{Context, Result, bail};
-use globset::{Glob, GlobSet, GlobSetBuilder};
+use globset::{GlobBuilder, GlobSet, GlobSetBuilder};
 use rayon::prelude::*;
 use tantivy::indexer::IndexWriterOptions;
 use tantivy::schema::Term;
@@ -130,7 +130,12 @@ fn root_prefix(root: &Path) -> String {
 fn build_globs(patterns: &[String]) -> Result<GlobSet> {
     let mut b = GlobSetBuilder::new();
     for p in patterns {
-        b.add(Glob::new(&p.replace('\\', "/")).with_context(|| format!("некорректный шаблон исключения: {p}"))?);
+        // На Windows и macOS регистр в путях не различается.
+        let glob = GlobBuilder::new(&p.replace('\\', "/"))
+            .case_insensitive(cfg!(any(windows, target_os = "macos")))
+            .build()
+            .with_context(|| format!("некорректный шаблон исключения: {p}"))?;
+        b.add(glob);
     }
     Ok(b.build()?)
 }

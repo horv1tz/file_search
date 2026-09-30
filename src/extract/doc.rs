@@ -64,6 +64,9 @@ pub struct Doc {
     pub units: Vec<String>,
     pub meta: String,
     limit: usize,
+    /// Достигнут лимит — читать дальше бессмысленно.
+    full: bool,
+    /// Текст неполный (по нашему лимиту или потому, что источник прочитан не целиком).
     truncated: bool,
     unit_start: usize,
 }
@@ -75,6 +78,7 @@ impl Doc {
             units: Vec::new(),
             meta: String::new(),
             limit,
+            full: false,
             truncated: false,
             unit_start: 0,
         }
@@ -82,7 +86,7 @@ impl Doc {
 
     /// Достигнут лимит текста — читать дальше бессмысленно.
     pub fn is_full(&self) -> bool {
-        self.truncated
+        self.full
     }
 
     /// Начинает новый юнит. Пустой предыдущий юнит не оставляем: его подпись заменяется.
@@ -94,6 +98,7 @@ impl Doc {
             }
             self.newline();
             if self.text.len() + 1 > self.limit {
+                self.full = true;
                 self.truncated = true;
                 return;
             }
@@ -103,8 +108,13 @@ impl Doc {
         self.unit_start = self.text.len();
     }
 
+    /// Источник был обрезан ещё до нас (например, прочитана только часть файла).
+    pub fn mark_truncated(&mut self) {
+        self.truncated = true;
+    }
+
     pub fn push(&mut self, s: &str) {
-        if self.truncated || s.is_empty() {
+        if self.full || s.is_empty() {
             return;
         }
         let room = self.limit.saturating_sub(self.text.len());
@@ -116,6 +126,7 @@ impl Doc {
                 cut -= 1;
             }
             self.text.push_str(&s[..cut]);
+            self.full = true;
             self.truncated = true;
         }
     }

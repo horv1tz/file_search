@@ -39,4 +39,7 @@ path = "src/main.rs"
 opt-level = 3
 lto = "thin"
 codegen-units = 4
+
+[dev-dependencies]
+tempfile = "3.27.0"
 # panic = "unwind" (по умолчанию) нужен: повреждённые файлы разбираются под catch_unwind

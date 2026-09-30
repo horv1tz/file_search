@@ -32,6 +32,28 @@ pub fn open_path(path: &Path) -> io::Result<()> {
     }
 }
 
+/// Открывает адрес в браузере по умолчанию.
+pub fn open_url(url: &str) -> io::Result<()> {
+    #[cfg(windows)]
+    {
+        let mut cmd = Command::new("explorer");
+        cmd.arg(url);
+        spawn(cmd)
+    }
+    #[cfg(target_os = "macos")]
+    {
+        let mut cmd = Command::new("open");
+        cmd.arg(url);
+        spawn(cmd)
+    }
+    #[cfg(not(any(windows, target_os = "macos")))]
+    {
+        let mut cmd = Command::new("xdg-open");
+        cmd.arg(url);
+        spawn(cmd)
+    }
+}
+
 /// Показывает файл в проводнике (с выделением, где это поддерживается).
 pub fn reveal_path(path: &Path) -> io::Result<()> {
     #[cfg(windows)]

@@ -247,12 +247,12 @@ impl Searcher {
         Some(generator)
     }
 
-    pub fn stats(&self, dir: &Path) -> Result<IndexStats> {
+    pub fn stats(&self, dir: Option<&Path>) -> Result<IndexStats> {
         let searcher = self.reader.searcher();
         let mut stats = IndexStats {
             documents: searcher.num_docs(),
             segments: searcher.segment_readers().len(),
-            size_on_disk: dir_size(dir),
+            size_on_disk: dir.map(dir_size).unwrap_or(0),
             ..Default::default()
         };
         let mut by_ext: HashMap<String, u64> = HashMap::new();

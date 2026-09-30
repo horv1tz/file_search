@@ -177,8 +177,7 @@ pub fn extract_file(path: &Path, size: u64, limits: &Limits) -> Extracted {
 
 fn run(path: &Path, kind: Kind, limits: &Limits, out: &mut Doc) -> anyhow::Result<()> {
     match kind {
-        Kind::Office => office(path, limits, out),
-        Kind::Odf => odf::extract(path, out),
+        Kind::Office | Kind::Odf => office(path, limits, out),
         Kind::Pdf => pdf::extract(path, out),
         Kind::Rtf => plain(path, limits, out, PlainMode::Rtf),
         Kind::Html => plain(path, limits, out, PlainMode::Html),
@@ -188,15 +187,19 @@ fn run(path: &Path, kind: Kind, limits: &Limits, out: &mut Doc) -> anyhow::Resul
     }
 }
 
-/// Office-файл: формат определяется по сигнатуре, а не по расширению
-/// (`.doc` бывает HTML или RTF, `.xls` — CSV, `.docx` — зашифрованным OLE).
+/// Office-файл: формат определяется по сигнатуре и содержимому, а не по расширению
+/// (`.doc` бывает HTML или RTF, `.xls` — CSV, `.docx` — зашифрованным OLE или файлом OpenDocument).
 fn office(path: &Path, limits: &Limits, out: &mut Doc) -> anyhow::Result<()> {
     let head = read_head(path, 16)?;
     if head.starts_with(ZIP_MAGIC) || head.starts_with(ZIP_EMPTY_MAGIC) {
-        if is_xlsb(path) {
-            return legacy::excel(path, true, out);
+        let mut pkg = ooxml::Pkg::open(path)?;
+        if pkg.has("xl/workbook.bin") {
+            legacy::excel(path, true, out)
+        } else if pkg.has("mimetype") && pkg.has("content.xml") {
+            odf::extract_pkg(&mut pkg, out)
+        } else {
+            ooxml::extract_pkg(&mut pkg, out)
         }
-        ooxml::extract(path, out)
     } else if head.starts_with(OLE_MAGIC) {
         legacy::extract(path, out)
     } else if rtf::looks_like_rtf(&head) {
@@ -205,10 +208,6 @@ fn office(path: &Path, limits: &Limits, out: &mut Doc) -> anyhow::Result<()> {
         // Ни zip, ни OLE, ни RTF: бывает HTML или обычный текст с «офисным» расширением.
         plain(path, limits, out, PlainMode::Sniff).map_err(|_| anyhow::anyhow!("содержимое не похоже на документ Office"))
     }
-}
-
-fn is_xlsb(path: &Path) -> bool {
-    path.extension().and_then(|e| e.to_str()).is_some_and(|e| e.eq_ignore_ascii_case("xlsb"))
 }
 
 #[derive(Clone, Copy)]
@@ -221,7 +220,10 @@ enum PlainMode {
 }
 
 fn plain(path: &Path, limits: &Limits, out: &mut Doc, mode: PlainMode) -> anyhow::Result<()> {
-    let (bytes, _) = text::read_prefix(path, limits.max_text_bytes)?;
+    let (bytes, cut) = text::read_prefix(path, limits.max_text_bytes)?;
+    if cut {
+        out.mark_truncated();
+    }
     if matches!(mode, PlainMode::Sniff) && text::looks_binary(&bytes[..bytes.len().min(8192)]) {
         anyhow::bail!("не текстовый файл");
     }

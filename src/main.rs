@@ -372,7 +372,7 @@ fn cmd_search(dir: &Path, a: SearchArgs) -> Result<()> {
 
 fn cmd_stats(dir: &Path) -> Result<()> {
     let searcher = Searcher::open(dir, false)?;
-    let s = searcher.stats(dir)?;
+    let s = searcher.stats(Some(dir))?;
     println!("Индекс:        {}", dir.display());
     println!("Файлов:        {}", s.documents);
     println!("Размер на диске: {}", format_size(s.size_on_disk));

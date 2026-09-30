@@ -1,7 +1,6 @@
 //! OpenDocument: .odt, .ods, .odp (и шаблоны) — LibreOffice / OpenOffice.
 
 use std::io::Read;
-use std::path::Path;
 
 use anyhow::Result;
 use quick_xml::events::BytesStart;
@@ -52,9 +51,7 @@ const RULES: Rules = Rules {
     ..Rules::EMPTY
 };
 
-pub fn extract(path: &Path, out: &mut Doc) -> Result<()> {
-    let mut pkg = Pkg::open(path)?;
-
+pub fn extract_pkg(pkg: &mut Pkg, out: &mut Doc) -> Result<()> {
     let mut mime = String::new();
     if pkg.has("mimetype") {
         pkg.part("mimetype")?.read_to_string(&mut mime).ok();

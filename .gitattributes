@@ -1,0 +1,3 @@
+tests/fixtures/* binary
+* text=auto eol=lf
+*.exe binary
