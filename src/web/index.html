@@ -173,7 +173,7 @@ function showHelp(results) {
   const h = el('div', 'help');
   h.innerHTML = '<p>Ищет по именам файлов и по содержимому: Word, Excel, PowerPoint, PDF, текстовые файлы. Учитывает словоформы («договор» найдёт «договоров»).</p>' +
     '<ul><li><code>договор аренды</code> — оба слова</li><li><code>"срок действия"</code> — точная фраза</li>' +
-    '<li><code>отчёт -черновик</code> — исключить слово</li><li><code>догов*</code> — начало слова</li>' +
+    '<li><code>отчёт -черновик</code> или <code>отчёт NOT черновик</code> — исключить слово</li><li><code>догов*</code> — начало слова</li>' +
     '<li><code>аренда~</code> — с опечатками</li><li><code>аренда OR лизинг</code> — любое из слов</li>' +
     '<li><code>name:смета</code> — только в имени, <code>content:смета</code> — только в тексте</li>' +
     '<li><code>ext:docx,xlsx</code> — только эти типы</li></ul>';

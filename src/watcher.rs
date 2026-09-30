@@ -41,6 +41,28 @@ impl WatchOptions {
     }
 }
 
+/// Корни, заданные через символические ссылки: (реальный путь, путь как задан).
+/// На macOS `/var` — ссылка на `/private/var`, и FSEvents сообщает реальные пути.
+fn root_aliases(roots: &[PathBuf]) -> Vec<(PathBuf, PathBuf)> {
+    roots
+        .iter()
+        .filter_map(|r| {
+            let real = fs::canonicalize(r).ok()?;
+            (real != *r).then(|| (real, r.clone()))
+        })
+        .collect()
+}
+
+/// Приводит путь из события к виду, в котором корень задан пользователем (иначе ключи в индексе разъедутся).
+fn rebase(path: PathBuf, aliases: &[(PathBuf, PathBuf)]) -> PathBuf {
+    for (real, given) in aliases {
+        if let Ok(rest) = path.strip_prefix(real) {
+            return given.join(rest);
+        }
+    }
+    path
+}
+
 fn stamp() -> String {
     chrono::Local::now().format("%H:%M:%S").to_string()
 }
@@ -55,6 +77,7 @@ pub fn watch(
 ) -> Result<()> {
     let roots: Vec<PathBuf> = opts.index.roots.iter().map(|r| normalize_root(r)).collect::<Result<_>>()?;
     let excluder = Excluder::new(&opts.index.excludes, opts.index.default_excludes)?;
+    let aliases = root_aliases(&roots);
 
     log("Первичная проверка индекса…");
     let s = indexer::run(index, fields, &opts.index, &Silent, cancel)?;
@@ -90,7 +113,7 @@ pub fn watch(
                     rescan_needed = true;
                 } else if !matches!(event.kind, EventKind::Access(_)) {
                     for p in event.paths {
-                        pending.insert(p, Instant::now());
+                        pending.insert(rebase(p, &aliases), Instant::now());
                     }
                 }
             }
@@ -191,4 +214,28 @@ fn apply(
 
 pub fn log_line(text: &str) {
     eprintln!("[{}] {text}", stamp());
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn event_paths_are_mapped_back_to_the_given_root() {
+        let aliases = vec![(PathBuf::from("/private/var/docs"), PathBuf::from("/var/docs"))];
+        assert_eq!(rebase(PathBuf::from("/private/var/docs/a/b.txt"), &aliases), PathBuf::from("/var/docs/a/b.txt"));
+        assert_eq!(rebase(PathBuf::from("/private/var/docs"), &aliases), PathBuf::from("/var/docs"));
+        assert_eq!(rebase(PathBuf::from("/other/x.txt"), &aliases), PathBuf::from("/other/x.txt"));
+        assert_eq!(
+            rebase(PathBuf::from("/private/var/docs2/x.txt"), &aliases),
+            PathBuf::from("/private/var/docs2/x.txt")
+        );
+    }
+
+    #[test]
+    fn no_aliases_for_plain_roots() {
+        let dir = std::env::temp_dir();
+        let real = fs::canonicalize(&dir).unwrap();
+        assert!(root_aliases(&[real]).is_empty());
+    }
 }

@@ -172,7 +172,7 @@ struct FilterArgs {
 
 #[derive(Args)]
 struct SearchArgs {
-    /// Запрос: слова, "точная фраза", -исключить, преф*, слово~, a OR b, name:…, ext:…
+    /// Запрос: слова, "точная фраза", NOT слово (или "-слово" в кавычках), преф*, слово~, a OR b, name:…, ext:…
     #[arg(value_name = "ЗАПРОС")]
     query: Vec<String>,
     #[command(flatten)]

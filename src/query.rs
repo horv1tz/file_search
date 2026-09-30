@@ -3,7 +3,7 @@
 //! ```text
 //! договор аренды        оба слова (в имени, содержимом или метаданных)
 //! "срок действия"       точная фраза
-//! отчёт -черновик       исключить слово
+//! отчёт -черновик       исключить слово (можно и так: NOT черновик, !черновик)
 //! догов*                префикс
 //! договр~               нечёткий поиск (опечатки), ~2 — до двух правок
 //! аренда OR лизинг      любое из двух
@@ -103,18 +103,24 @@ fn split_tokens(input: &str) -> Vec<String> {
 pub fn parse(input: &str) -> Parsed {
     let mut parsed = Parsed::default();
     let mut or_next = false;
+    let mut not_next = false;
 
     for raw in split_tokens(input) {
         if raw == "OR" || raw == "||" {
             or_next = !parsed.groups.is_empty();
             continue;
         }
+        if raw == "NOT" {
+            not_next = true;
+            continue;
+        }
         let mut tok = raw.as_str();
-        let mut negate = false;
-        if let Some(rest) = tok.strip_prefix('-').filter(|r| !r.is_empty()) {
+        let mut negate = std::mem::take(&mut not_next);
+        let has_word = |r: &&str| r.chars().any(|c| c.is_alphanumeric() || c == '"');
+        if let Some(rest) = tok.strip_prefix(['-', '!']).filter(has_word) {
             negate = true;
             tok = rest;
-        } else if let Some(rest) = tok.strip_prefix('+').filter(|r| !r.is_empty()) {
+        } else if let Some(rest) = tok.strip_prefix('+').filter(has_word) {
             tok = rest;
         }
 
@@ -474,6 +480,15 @@ mod tests {
         assert_eq!(p.groups.len(), 2);
         assert_eq!(p.groups[0].len(), 2);
         assert_eq!(p.groups[1], [word("счёт")]);
+    }
+
+    #[test]
+    fn not_and_bang_negate() {
+        for q in ["отчёт NOT черновик", "отчёт !черновик", "отчёт -черновик"] {
+            let p = parse(q);
+            assert_eq!(p.groups.len(), 1, "{q}");
+            assert_eq!(p.negatives.len(), 1, "{q}");
+        }
     }
 
     #[test]
