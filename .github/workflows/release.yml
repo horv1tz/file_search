@@ -1,0 +1,122 @@
+name: Release
+
+# Релиз собирается при создании тега v* (например, v0.1.0) или вручную (Actions → Release → Run workflow).
+# При ручном запуске с publish=false только собираются архивы (проверка сборки), релиз не создаётся.
+on:
+  push:
+    tags: ["v*"]
+  workflow_dispatch:
+    inputs:
+      tag:
+        description: "Тег релиза, например v0.1.0"
+        required: true
+      publish:
+        description: "Опубликовать релиз (false — только собрать архивы)"
+        type: boolean
+        default: true
+
+permissions:
+  contents: write
+
+env:
+  CARGO_TERM_COLOR: always
+  TAG: ${{ github.event.inputs.tag || github.ref_name }}
+
+jobs:
+  build:
+    name: Сборка (${{ matrix.name }})
+    runs-on: ${{ matrix.os }}
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - name: windows-x64
+            os: windows-latest
+            # Статическая C-библиотека: программе не нужен установленный «Microsoft Visual C++ Redistributable».
+            rustflags: "-C target-feature=+crt-static"
+          - name: linux-x64
+            os: ubuntu-latest
+            rustflags: ""
+          - name: macos-arm64
+            os: macos-latest
+            rustflags: ""
+    steps:
+      - uses: actions/checkout@v4
+      - uses: dtolnay/rust-toolchain@stable
+      - uses: Swatinem/rust-cache@v2
+        with:
+          key: release-${{ matrix.name }}
+
+      - name: Тесты
+        run: cargo test --release
+        env:
+          RUSTFLAGS: ${{ matrix.rustflags }}
+
+      - name: Сборка
+        run: cargo build --release
+        env:
+          RUSTFLAGS: ${{ matrix.rustflags }}
+
+      - name: Упаковка (Windows)
+        if: runner.os == 'Windows'
+        shell: pwsh
+        run: |
+          New-Item -ItemType Directory -Force dist | Out-Null
+          Compress-Archive -Force -DestinationPath "dist/fsearch-$env:TAG-windows-x64.zip" -Path `
+            target/release/fsearch-gui.exe, target/release/fsearch.exe, README.md
+          # Отдельный exe окна — чтобы можно было скачать и запустить без распаковки.
+          Copy-Item target/release/fsearch-gui.exe dist/fsearch-gui-windows-x64.exe
+
+      - name: Упаковка (Linux и macOS)
+        if: runner.os != 'Windows'
+        shell: bash
+        run: |
+          mkdir -p dist "pkg/fsearch-$TAG-${{ matrix.name }}"
+          cp target/release/fsearch-gui target/release/fsearch README.md "pkg/fsearch-$TAG-${{ matrix.name }}/"
+          tar -czf "dist/fsearch-$TAG-${{ matrix.name }}.tar.gz" -C pkg "fsearch-$TAG-${{ matrix.name }}"
+
+      - uses: actions/upload-artifact@v4
+        with:
+          name: dist-${{ matrix.name }}
+          path: dist/*
+          if-no-files-found: error
+
+  release:
+    name: Публикация релиза
+    needs: build
+    runs-on: ubuntu-latest
+    if: github.event_name == 'push' || github.event.inputs.publish == 'true'
+    steps:
+      - uses: actions/download-artifact@v4
+        with:
+          pattern: dist-*
+          path: dist
+          merge-multiple: true
+
+      - name: Контрольные суммы
+        working-directory: dist
+        run: sha256sum * > SHA256SUMS.txt && cat SHA256SUMS.txt
+
+      - uses: softprops/action-gh-release@v2
+        with:
+          tag_name: ${{ env.TAG }}
+          target_commitish: ${{ github.sha }}
+          name: Поиск файлов ${{ env.TAG }}
+          generate_release_notes: true
+          files: dist/*
+          body: |
+            ## Что скачать
+
+            | Файл | Для чего |
+            |---|---|
+            | `fsearch-gui-windows-x64.exe` | **Окно программы для Windows** — скачайте и запустите двойным щелчком, установка не нужна |
+            | `fsearch-<версия>-windows-x64.zip` | То же окно и консольная версия `fsearch.exe` |
+            | `fsearch-<версия>-linux-x64.tar.gz` | Linux (x86-64) |
+            | `fsearch-<версия>-macos-arm64.tar.gz` | macOS на процессорах Apple Silicon |
+            | `SHA256SUMS.txt` | Контрольные суммы файлов |
+
+            Программа не подписана цифровой подписью, поэтому Windows SmartScreen может показать предупреждение
+            «Неизвестный издатель»: нажмите «Подробнее» → «Выполнить в любом случае».
+
+            Быстрый старт: запустите `fsearch-gui`, выберите диск или папку — программа проиндексирует файлы и найдёт их по названию и по тексту внутри (Word, Excel, PowerPoint, PDF, текст).
+            Подробности — в [README](https://github.com/${{ github.repository }}/blob/${{ github.sha }}/README.md).
