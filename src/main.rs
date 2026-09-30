@@ -301,7 +301,7 @@ fn cmd_watch(dir: &Path, a: WatchArgs) -> Result<()> {
     let mut opts = WatchOptions::new(a.scan.options(a.paths));
     opts.rescan_every = Duration::from_secs(a.rescan_minutes.max(1) * 60);
     println!("Индекс: {}\nСлежение до Ctrl+C.", dir.display());
-    watcher::watch(&index, &fields, &opts, &watcher::log_line, &cancel)?;
+    watcher::watch(&index, &fields, &opts, &indexer::Silent, &watcher::log_line, &cancel)?;
     println!("Слежение остановлено.");
     Ok(())
 }
@@ -316,7 +316,7 @@ fn cmd_serve(dir: &Path, a: ServeArgs) -> Result<()> {
         {
             let (cancel, done) = (cancel.clone(), done.clone());
             std::thread::spawn(move || {
-                if let Err(e) = watcher::watch(&index, &fields, &opts, &watcher::log_line, &cancel) {
+                if let Err(e) = watcher::watch(&index, &fields, &opts, &indexer::Silent, &watcher::log_line, &cancel) {
                     eprintln!("{} {e:#}", style("Слежение остановлено из-за ошибки:").red());
                 }
                 done.store(true, Ordering::SeqCst);

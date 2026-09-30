@@ -31,4 +31,6 @@ jobs:
           path: |
             target/release/fsearch
             target/release/fsearch.exe
+            target/release/fsearch-gui
+            target/release/fsearch-gui.exe
           if-no-files-found: ignore

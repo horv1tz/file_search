@@ -26,6 +26,11 @@ thread_local! {
     static IN_EXTRACT: Cell<bool> = const { Cell::new(false) };
 }
 
+/// Выполняется ли сейчас разбор файла (паники там ожидаемы и перехватываются).
+pub fn in_extraction() -> bool {
+    IN_EXTRACT.with(Cell::get)
+}
+
 /// Заглушает сообщения о паниках, перехваченных при разборе файлов; остальные паники печатаются как обычно.
 pub fn install_quiet_panic_hook() {
     let previous = std::panic::take_hook();

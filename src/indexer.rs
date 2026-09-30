@@ -27,6 +27,7 @@ const COMMIT_TEXT_BUDGET: usize = 128 << 20;
 const COMMIT_DOC_BUDGET: usize = 50_000;
 const MAX_REPORTED_FAILURES: usize = 1000;
 
+#[derive(Clone)]
 pub struct Options {
     pub roots: Vec<PathBuf>,
     /// Glob-шаблоны исключений; применяются к полному пути и к имени файла/папки.
@@ -36,6 +37,8 @@ pub struct Options {
     pub threads: usize,
     /// Переиндексировать всё, даже неизменённые файлы.
     pub force: bool,
+    /// Сохранять индекс не реже чем раз в этот срок: так найденное появляется в поиске ещё во время индексации.
+    pub commit_every: Option<Duration>,
 }
 
 impl Options {
@@ -47,12 +50,17 @@ impl Options {
             limits: Limits::default(),
             threads: std::thread::available_parallelism().map(|n| n.get()).unwrap_or(4),
             force: false,
+            commit_every: None,
         }
     }
 }
 
 /// Обратная связь для интерфейса (индикатор прогресса).
 pub trait Progress: Sync {
+    /// Начался проход (обход папок и индексация).
+    fn started(&self) {}
+    /// Проход закончен (в том числе прерванный и пустой).
+    fn finished(&self, _summary: &Summary) {}
     fn scanning(&self, _files_seen: u64) {}
     fn indexing_started(&self, _total: u64) {}
     fn file_done(&self, _path: &Path, _status: &Status) {}
@@ -291,6 +299,17 @@ pub fn delete_path(writer: &IndexWriter, fields: &Fields, path: &Path) -> Result
     Ok(())
 }
 
+/// Убирает из индекса всё, что лежит под корнем (когда папку исключили из поиска).
+pub fn remove_root(index: &Index, fields: &Fields, root: &Path) -> Result<()> {
+    let mut writer = index.writer_with_options::<TantivyDocument>(
+        IndexWriterOptions::builder().num_worker_threads(1).memory_budget_per_thread(32 << 20).build(),
+    )?;
+    delete_path(&writer, fields, root)?;
+    writer.commit()?;
+    writer.wait_merging_threads()?;
+    Ok(())
+}
+
 /// Индексирует все файлы папки (например, появившейся или переименованной). Возвращает их число.
 pub fn index_tree(
     writer: &IndexWriter,
@@ -317,6 +336,22 @@ pub fn index_tree(
 }
 
 pub fn run(
+    index: &Index,
+    fields: &Fields,
+    opts: &Options,
+    progress: &dyn Progress,
+    cancel: &AtomicBool,
+) -> Result<Summary> {
+    progress.started();
+    let result = run_inner(index, fields, opts, progress, cancel);
+    match &result {
+        Ok(summary) => progress.finished(summary),
+        Err(_) => progress.finished(&Summary::default()),
+    }
+    result
+}
+
+fn run_inner(
     index: &Index,
     fields: &Fields,
     opts: &Options,
@@ -412,6 +447,7 @@ pub fn run(
     progress.indexing_started(todo.len() as u64);
     let pending_bytes = AtomicUsize::new(0);
     let pending_docs = AtomicUsize::new(0);
+    let last_commit = std::sync::Mutex::new(Instant::now());
     let indexed = AtomicU64::new(0);
     let counters = Counters::default();
     let failures = std::sync::Mutex::new(Vec::<(PathBuf, String)>::new());
@@ -446,7 +482,8 @@ pub fn run(
 
             let bytes = pending_bytes.fetch_add(text_len + 512, Ordering::Relaxed) + text_len + 512;
             let docs = pending_docs.fetch_add(1, Ordering::Relaxed) + 1;
-            if bytes > COMMIT_TEXT_BUDGET || docs > COMMIT_DOC_BUDGET {
+            let due = opts.commit_every.is_some_and(|every| last_commit.lock().unwrap().elapsed() >= every);
+            if bytes > COMMIT_TEXT_BUDGET || docs > COMMIT_DOC_BUDGET || due {
                 // Коммит нужен, чтобы очередь tantivy не накопила гигабайты текста.
                 let mut w = writer.write().unwrap();
                 if pending_bytes.load(Ordering::Relaxed) > 0 {
@@ -455,6 +492,7 @@ pub fn run(
                     }
                     pending_bytes.store(0, Ordering::Relaxed);
                     pending_docs.store(0, Ordering::Relaxed);
+                    *last_commit.lock().unwrap() = Instant::now();
                 }
             }
         });

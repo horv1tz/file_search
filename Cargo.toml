@@ -15,13 +15,17 @@ clap = { version = "4.6.7", features = ["derive", "env"] }
 console = "0.16.6"
 ctrlc = "3.5.2"
 dirs = "7.0.0"
+eframe = { version = "0.33.3", features = ["wgpu", "persistence"], optional = true }
+egui = { version = "0.33.3", default-features = false, optional = true }
 encoding_rs = "0.8.42"
 globset = "0.4.20"
+image = { version = "0.25", default-features = false, features = ["png"], optional = true }
 indicatif = "0.18.6"
 notify = "8.2.0"
 pdf-extract = "0.12.1"
 quick-xml = "0.42.0"
 rayon = "1.12.0"
+rfd = { version = "0.17.2", optional = true }
 rust-stemmers = "1.2.0"
 serde = { version = "1.0.229", features = ["derive"] }
 serde_json = "1.0.151"
@@ -38,11 +42,24 @@ path = "src/lib.rs"
 name = "fsearch"
 path = "src/main.rs"
 
+[[bin]]
+name = "fsearch-gui"
+path = "src/bin/fsearch-gui/main.rs"
+required-features = ["gui"]
+
 [profile.release]
 opt-level = 3
 lto = "thin"
 codegen-units = 4
+# panic = "unwind" (по умолчанию) нужен: повреждённые файлы разбираются под catch_unwind
 
 [dev-dependencies]
 tempfile = "3.27.0"
-# panic = "unwind" (по умолчанию) нужен: повреждённые файлы разбираются под catch_unwind
+
+[features]
+default = ["gui"]
+# Графическое приложение fsearch-gui (окно на egui). Без него собираются только библиотека и консольный fsearch.
+gui = ["dep:eframe", "dep:egui", "dep:rfd", "dep:image"]
+
+[build-dependencies]
+winresource = "0.1.31"

@@ -17,7 +17,7 @@ use notify::{EventKind, RecursiveMode, Watcher};
 use tantivy::Index;
 use tantivy::indexer::IndexWriterOptions;
 
-use crate::indexer::{self, Excluder, Options, Silent, delete_path, index_tree, normalize_root, upsert_file};
+use crate::indexer::{self, Excluder, Options, Progress, delete_path, index_tree, normalize_root, upsert_file};
 use crate::schema::Fields;
 
 pub struct WatchOptions {
@@ -72,6 +72,7 @@ pub fn watch(
     index: &Index,
     fields: &Fields,
     opts: &WatchOptions,
+    progress: &dyn Progress,
     log: &dyn Fn(&str),
     cancel: &AtomicBool,
 ) -> Result<()> {
@@ -80,7 +81,10 @@ pub fn watch(
     let aliases = root_aliases(&roots);
 
     log("Первичная проверка индекса…");
-    let s = indexer::run(index, fields, &opts.index, &Silent, cancel)?;
+    let s = indexer::run(index, fields, &opts.index, progress, cancel)?;
+    // «Переиндексировать всё» относится только к первому проходу.
+    let mut rescan_opts = opts.index.clone();
+    rescan_opts.force = false;
     log(&format!(
         "Проверено файлов: {}, добавлено или обновлено: {}, удалено: {}. Слежу за изменениями…",
         s.scanned, s.indexed, s.removed
@@ -159,7 +163,7 @@ pub fn watch(
 
         let quiet = last_event.elapsed() >= opts.debounce;
         if (rescan_needed && quiet) || last_scan.elapsed() >= opts.rescan_every {
-            match indexer::run(index, fields, &opts.index, &Silent, cancel) {
+            match indexer::run(index, fields, &rescan_opts, progress, cancel) {
                 Ok(s) if s.indexed + s.removed > 0 => {
                     log(&format!("Полная проверка: обновлено {}, удалено {}", s.indexed, s.removed))
                 }

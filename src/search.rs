@@ -301,6 +301,11 @@ impl Searcher {
         Ok(stats)
     }
 
+    /// Сколько файлов сейчас в индексе (дёшево, в отличие от [`Searcher::stats`]).
+    pub fn num_docs(&self) -> u64 {
+        self.reader.searcher().num_docs()
+    }
+
     /// Есть ли путь в индексе (для безопасного открытия файлов из интерфейса).
     pub fn contains_path(&self, path: &str) -> bool {
         let searcher = self.reader.searcher();

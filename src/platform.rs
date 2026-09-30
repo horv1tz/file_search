@@ -10,6 +10,46 @@ fn spawn(mut cmd: Command) -> io::Result<()> {
     cmd.stdin(Stdio::null()).stdout(Stdio::null()).stderr(Stdio::null()).spawn().map(|_| ())
 }
 
+/// Такие файлы из интерфейса можно только показать в папке, но не запустить.
+const NEVER_LAUNCH: &[&str] = &[
+    "exe",
+    "bat",
+    "cmd",
+    "com",
+    "msi",
+    "msp",
+    "ps1",
+    "psm1",
+    "vbs",
+    "vbe",
+    "js",
+    "jse",
+    "wsf",
+    "wsh",
+    "scr",
+    "lnk",
+    "reg",
+    "jar",
+    "sh",
+    "app",
+    "dll",
+    "cpl",
+    "hta",
+    "pif",
+    "appx",
+    "msix",
+    "url",
+    "inf",
+    "gadget",
+    "appref-ms",
+];
+
+/// Можно ли открывать файл программой по умолчанию (исполняемые и скриптовые — нельзя).
+pub fn is_safe_to_open(path: &Path) -> bool {
+    let ext = path.extension().and_then(|e| e.to_str()).map(str::to_lowercase).unwrap_or_default();
+    !NEVER_LAUNCH.contains(&ext.as_str())
+}
+
 /// Открывает файл программой по умолчанию.
 pub fn open_path(path: &Path) -> io::Result<()> {
     #[cfg(windows)]
@@ -134,6 +174,14 @@ pub fn parse_date_ms(s: &str, end_of_day: bool) -> Option<u64> {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn executables_are_not_launched() {
+        assert!(!is_safe_to_open(Path::new(r"D:\Games\setup.EXE")));
+        assert!(!is_safe_to_open(Path::new("script.ps1")));
+        assert!(is_safe_to_open(Path::new("report.docx")));
+        assert!(is_safe_to_open(Path::new("noext")));
+    }
 
     #[test]
     fn sizes() {

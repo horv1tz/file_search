@@ -21,40 +21,6 @@ use crate::search::{SearchOptions, Searcher, Sort};
 
 const INDEX_HTML: &str = include_str!("index.html");
 
-/// Такие файлы из браузерного интерфейса можно только показать в папке, но не запустить.
-const NEVER_LAUNCH: &[&str] = &[
-    "exe",
-    "bat",
-    "cmd",
-    "com",
-    "msi",
-    "msp",
-    "ps1",
-    "psm1",
-    "vbs",
-    "vbe",
-    "js",
-    "jse",
-    "wsf",
-    "wsh",
-    "scr",
-    "lnk",
-    "reg",
-    "jar",
-    "sh",
-    "app",
-    "dll",
-    "cpl",
-    "hta",
-    "pif",
-    "appx",
-    "msix",
-    "url",
-    "inf",
-    "gadget",
-    "appref-ms",
-];
-
 struct State {
     searcher: Searcher,
     token: String,
@@ -252,10 +218,9 @@ fn handle(state: &State, mut req: Request) {
             }
             let file = PathBuf::from(file);
             let action = param(&params, "action").unwrap_or("open");
-            let ext = file.extension().and_then(|e| e.to_str()).map(str::to_lowercase).unwrap_or_default();
             let result = match action {
                 "reveal" => platform::reveal_path(&file),
-                "open" if NEVER_LAUNCH.contains(&ext.as_str()) => {
+                "open" if !platform::is_safe_to_open(&file) => {
                     return error_json(req, 403, "исполняемые файлы отсюда не запускаются — используйте «В папке»");
                 }
                 "open" => platform::open_path(&file),

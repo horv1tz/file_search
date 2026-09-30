@@ -46,7 +46,7 @@ fn watch_applies_creates_changes_moves_and_deletes() {
     let cancel = Arc::new(AtomicBool::new(false));
     let worker = {
         let cancel = cancel.clone();
-        thread::spawn(move || watcher::watch(&index, &fields, &opts, &|_| {}, &cancel))
+        thread::spawn(move || watcher::watch(&index, &fields, &opts, &file_search::indexer::Silent, &|_| {}, &cancel))
     };
     let q = |query: &str| names(idx.path(), query);
 

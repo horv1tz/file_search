@@ -273,6 +273,20 @@ fn deleted_text_disappears_from_results() {
 }
 
 #[test]
+fn periodic_commits_keep_the_index_consistent() {
+    let env = Env::new();
+    for i in 0..60 {
+        fs::write(env.root().join(format!("заметка{i}.txt")), format!("текст заметки номер {i} про Лемура")).unwrap();
+    }
+    let mut opts = Options::new(vec![env.root().to_path_buf()]);
+    opts.commit_every = Some(std::time::Duration::from_millis(1));
+    let s = env.index_with(opts);
+    assert_eq!(s.indexed, 67);
+    assert_eq!(env.search("Лемура").total, 60);
+    assert_eq!(env.search("Тюльпаны").total, 2, "документы на месте, дублей нет");
+}
+
+#[test]
 fn force_reindexes_everything() {
     let env = Env::new();
     env.index();
