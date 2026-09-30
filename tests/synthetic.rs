@@ -227,7 +227,7 @@ fn unknown_extensions_are_read_only_when_they_look_like_text() {
 
     let binary = dir.path().join("blob.xyz");
     fs::write(&binary, [0u8, 1, 2, 3, 0, 0, 255, 254, 0, 9, 0, 0]).unwrap();
-    assert!(matches!(run(&binary).status, Status::Failed(_)));
+    assert!(matches!(run(&binary).status, Status::Skipped(_)), "двоичный файл — не ошибка");
 
     let exe = dir.path().join("prog.exe");
     fs::write(&exe, b"MZ\x90\x00").unwrap();

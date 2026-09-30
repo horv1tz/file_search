@@ -215,6 +215,12 @@ fn docx(pkg: &mut Pkg, main: &str, out: &mut Doc) -> Result<()> {
     for name in extras {
         let _ = process(pkg, &name, &DOCX_RULES, out);
     }
+    // Текст схем SmartArt лежит в отдельных частях, на которые ссылается главный документ.
+    for rel in read_rels(pkg, main) {
+        if rel_type_is(&rel, "diagramData") {
+            let _ = process(pkg, &rel.target, &PPTX_RULES, out);
+        }
+    }
     Ok(())
 }
 

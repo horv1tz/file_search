@@ -48,6 +48,18 @@ impl fmt::Display for Encrypted {
 
 impl std::error::Error for Encrypted {}
 
+/// Файл с неизвестным расширением оказался не текстовым — это не ошибка, просто читать нечего.
+#[derive(Debug)]
+pub struct NotText;
+
+impl fmt::Display for NotText {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        f.write_str("не текстовый файл")
+    }
+}
+
+impl std::error::Error for NotText {}
+
 #[derive(Debug, Clone)]
 pub struct Limits {
     /// Максимум текста, который берём из одного файла.
@@ -240,6 +252,7 @@ pub fn extract_file(path: &Path, size: u64, limits: &Limits) -> Extracted {
     match error {
         None => {}
         Some(e) if e.downcast_ref::<Encrypted>().is_some() => extracted.status = Status::Encrypted,
+        Some(e) if e.downcast_ref::<NotText>().is_some() => extracted.status = Status::Skipped(e.to_string()),
         Some(e) => extracted.status = Status::Failed(format!("{e:#}")),
     }
     extracted
@@ -291,12 +304,13 @@ enum PlainMode {
 }
 
 fn plain(path: &Path, limits: &Limits, out: &mut Doc, mode: PlainMode) -> anyhow::Result<()> {
+    // Неизвестные расширения: по первым килобайтам решаем, стоит ли читать файл целиком.
+    if matches!(mode, PlainMode::Sniff) && text::looks_binary(&read_head(path, 8192)?) {
+        return Err(NotText.into());
+    }
     let (bytes, cut) = text::read_prefix(path, limits.max_text_bytes)?;
     if cut {
         out.mark_truncated();
-    }
-    if matches!(mode, PlainMode::Sniff) && text::looks_binary(&bytes[..bytes.len().min(8192)]) {
-        anyhow::bail!("не текстовый файл");
     }
     if matches!(mode, PlainMode::Rtf) {
         rtf::extract(&bytes, out);
