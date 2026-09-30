@@ -44,6 +44,15 @@ fn header(ui: &mut Ui, app: &mut App, actions: &mut Vec<Action>) {
             .margin(Margin::symmetric(10, 8))
             .desired_width((ui.available_width() - button_width - 30.0).max(160.0))
             .show(ui);
+        if output.response.has_focus() {
+            // Esc очищает запрос, а не уводит фокус из поля: иначе дальнейший набор уходил бы в пустоту.
+            ui.memory_mut(|m| {
+                m.set_focus_lock_filter(
+                    output.response.id,
+                    egui::EventFilter { escape: true, horizontal_arrows: true, vertical_arrows: true, tab: false },
+                )
+            });
+        }
         if app.focus_search {
             output.response.request_focus();
             // При Ctrl+F выделяем весь запрос, чтобы его можно было сразу заменить.
@@ -129,7 +138,7 @@ fn status_bar(ui: &mut Ui, app: &App, pal: &Palette, actions: &mut Vec<Action>) 
     ui.horizontal(|ui| {
         let left = if app.form.is_empty() {
             if app.num_docs > 0 { format!("В индексе файлов: {}", app.num_docs) } else { String::new() }
-        } else if app.searching && app.results.is_empty() {
+        } else if app.pending() && app.results.is_empty() {
             "Поиск…".to_string()
         } else if app.search_error.is_some() {
             "Ошибка поиска".to_string()
@@ -153,11 +162,13 @@ fn status_bar(ui: &mut Ui, app: &App, pal: &Palette, actions: &mut Vec<Action>) 
                     } else {
                         ui.spinner();
                         let phase = st.phase();
-                        ui.label(
-                            RichText::new(if phase.is_empty() { "Индексация…".to_string() } else { phase })
-                                .size(12.5)
-                                .color(pal.accent),
-                        );
+                        let scanned = st.scanned.load(Ordering::Relaxed);
+                        let text = match (phase.is_empty(), scanned) {
+                            (true, _) => "Индексация…".to_string(),
+                            (false, 0) => phase,
+                            (false, n) => format!("{phase} · найдено файлов: {n}"),
+                        };
+                        ui.label(RichText::new(text).size(12.5).color(pal.accent));
                     }
                 });
                 inner.response
@@ -191,7 +202,7 @@ fn central(ui: &mut Ui, app: &mut App, pal: &Palette, dark: bool, actions: &mut 
     if let Some(error) = &app.backend_error {
         return index_error(ui, error, pal, actions);
     }
-    if app.settings.roots.is_empty() && app.num_docs == 0 && app.form.is_empty() {
+    if app.settings.roots.is_empty() && app.num_docs == 0 {
         return onboarding(ui, app, pal, actions);
     }
     if app.form.is_empty() {
@@ -205,7 +216,7 @@ fn central(ui: &mut Ui, app: &mut App, pal: &Palette, dark: bool, actions: &mut 
     if app.results.is_empty() {
         ui.add_space(24.0);
         ui.vertical_centered(|ui| {
-            if app.searching {
+            if app.pending() {
                 ui.label(RichText::new("Поиск…").color(pal.muted));
             } else {
                 ui.label(RichText::new("Ничего не найдено").size(18.0).strong());
@@ -213,7 +224,7 @@ fn central(ui: &mut Ui, app: &mut App, pal: &Palette, dark: bool, actions: &mut 
                 let hint = if indexing {
                     "Индексация ещё идёт — файлы будут появляться в результатах по мере добавления."
                 } else {
-                    "Попробуйте другие слова, уберите фильтры или добавьте * к началу слова: догов*"
+                    "Попробуйте другие слова, уберите фильтры или допишите * в конце слова: догов*"
                 };
                 ui.label(RichText::new(hint).color(pal.muted));
             }
@@ -298,19 +309,28 @@ fn hit_row(
 ) -> egui::Rect {
     // Фон рисуем после содержимого (когда известно, наведён ли курсор), поэтому резервируем место в списке фигур.
     let background = ui.painter().add(Shape::Noop);
-    let inner = ui.scope_builder(UiBuilder::new().sense(Sense::click()), |ui| {
+    let inner = ui.scope_builder(UiBuilder::new().id_salt(&hit.path).sense(Sense::click()), |ui| {
         Frame::new().inner_margin(Margin::symmetric(14, 10)).show(ui, |ui| {
             ui.set_width(ui.available_width());
             ui.horizontal(|ui| {
                 let (color, label) = theme::badge(&hit.ext, dark);
                 badge(ui, &label, color);
-                ui.add(egui::Label::new(RichText::new(&hit.name).strong().size(15.5)).truncate());
+                let meta = RichText::new(format!("{} · {}", format_size(hit.size), format_time(hit.modified_ms)))
+                    .size(12.5)
+                    .color(pal.muted);
+                // Правую часть (размер и дата) резервируем заранее, иначе длинное имя наезжает на неё.
+                let meta_width = ui
+                    .painter()
+                    .layout_no_wrap(meta.text().to_string(), FontId::proportional(12.5), pal.muted)
+                    .size()
+                    .x;
+                let name_width = (ui.available_width() - meta_width - 16.0).max(80.0);
+                ui.scope(|ui| {
+                    ui.set_max_width(name_width);
+                    ui.add(egui::Label::new(RichText::new(&hit.name).strong().size(15.5)).truncate());
+                });
                 ui.with_layout(Layout::right_to_left(Align::Center), |ui| {
-                    ui.label(
-                        RichText::new(format!("{} · {}", format_size(hit.size), format_time(hit.modified_ms)))
-                            .size(12.5)
-                            .color(pal.muted),
-                    );
+                    ui.label(meta);
                 });
             });
             ui.horizontal(|ui| {

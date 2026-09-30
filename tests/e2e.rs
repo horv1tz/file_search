@@ -287,6 +287,70 @@ fn periodic_commits_keep_the_index_consistent() {
 }
 
 #[test]
+fn index_folder_inside_an_indexed_root_is_never_indexed() {
+    let docs = TempDir::new().unwrap();
+    fs::write(docs.path().join("a.txt"), "документ про Бобра").unwrap();
+    fs::write(docs.path().join("b.txt"), "документ про Выдру").unwrap();
+    let index_dir = docs.path().join(".fsearch-index");
+
+    let run = || {
+        let (index, fields) = open_or_create_index(&index_dir).unwrap();
+        let mut opts = Options::new(vec![docs.path().to_path_buf()]);
+        opts.skip_dirs = vec![index_dir.clone()];
+        indexer::run(&index, &fields, &opts, &Silent, &AtomicBool::new(false)).unwrap()
+    };
+    let first = run();
+    assert_eq!((first.scanned, first.indexed), (2, 2), "файлы индекса не считаются: {first:?}");
+    let second = run();
+    assert_eq!((second.scanned, second.indexed, second.unchanged), (2, 0, 2), "цикла самоиндексации нет: {second:?}");
+    let stats = Searcher::open(&index_dir, false).unwrap().stats(None).unwrap();
+    assert_eq!(stats.documents, 2);
+}
+
+#[test]
+fn failed_files_are_retried_on_the_next_run() {
+    let env = Env::new();
+    let broken = env.root().join("временно.docx");
+    fs::write(&broken, b"PK\x03\x04broken").unwrap();
+    let first = env.index();
+    assert_eq!(first.failed_total, 1);
+    // Без изменений файла повторная попытка всё равно выполняется: сбой мог быть временным.
+    let second = env.index();
+    assert_eq!((second.indexed, second.failed_total), (1, 1), "{second:?}");
+    // Файл «починили» (например, отпустила другая программа) — он читается.
+    fs::copy(fixture("contract.docx"), &broken).unwrap();
+    let third = env.index();
+    assert_eq!((third.indexed, third.failed_total), (1, 0), "{third:?}");
+    let fourth = env.index();
+    assert_eq!(fourth.indexed, 0, "прочитанный файл больше не трогаем");
+    assert_eq!(env.search("Кракозябровая").total, 4);
+}
+
+#[test]
+fn one_missing_root_does_not_stop_the_others() {
+    let env = Env::new();
+    let other = TempDir::new().unwrap();
+    fs::write(other.path().join("x.txt"), "второй корень про Тукана").unwrap();
+    let gone = env.root().join("нет такой папки");
+    let s = env.index_with(Options::new(vec![other.path().to_path_buf(), gone]));
+    assert_eq!(s.indexed, 1);
+    assert_eq!(s.walk_errors_total, 1, "{s:?}");
+    assert_eq!(env.names("Тукана"), ["x.txt"]);
+}
+
+#[test]
+fn overlapping_roots_do_not_duplicate_documents() {
+    let env = Env::new();
+    let s = env.index_with(Options::new(vec![
+        env.root().to_path_buf(),
+        env.root().join("Отчёты"),
+        env.root().to_path_buf(),
+    ]));
+    assert_eq!(s.scanned, 7, "каждый файл обходится один раз: {s:?}");
+    assert_eq!(env.search("Тюльпаны").total, 2);
+}
+
+#[test]
 fn force_reindexes_everything() {
     let env = Env::new();
     env.index();

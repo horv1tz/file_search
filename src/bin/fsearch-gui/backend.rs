@@ -7,7 +7,7 @@ use std::sync::atomic::{AtomicBool, AtomicU64, Ordering};
 use std::sync::mpsc::{Receiver, Sender, channel};
 use std::sync::{Arc, Mutex};
 use std::thread::{self, JoinHandle};
-use std::time::Duration;
+use std::time::{Duration, Instant};
 
 use anyhow::Result;
 use file_search::extract::{Limits, Status};
@@ -36,6 +36,10 @@ pub struct IndexState {
     pub total: AtomicU64,
     /// Растёт каждый раз, когда содержимое индекса могло измениться.
     pub generation: AtomicU64,
+    /// Номер последнего запущенного потока индексации: поток, которого уже заменили, не должен гасить флаги нового.
+    pub epoch: AtomicU64,
+    /// Папки, записи которых удалены из индекса; окно убирает их из списка отложенных удалений.
+    pub removed_done: Mutex<Vec<PathBuf>>,
     pub phase: Mutex<String>,
     pub current: Mutex<String>,
     pub summary: Mutex<Option<Summary>>,
@@ -60,7 +64,24 @@ impl IndexState {
 struct GuiProgress {
     state: Arc<IndexState>,
     ctx: egui::Context,
+    /// Когда в последний раз просили окно обновить выдачу (мс от `started`).
+    last_refresh: AtomicU64,
+    started: Instant,
 }
+
+/// Объясняет по-русски самые частые сбои, о которых tantivy сообщает по-английски.
+fn friendly_error(message: &str) -> String {
+    let lower = message.to_lowercase();
+    if lower.contains("lockfile") || lower.contains("lock file") || lower.contains("lockbusy") {
+        "индекс сейчас использует другая программа (вторая копия окна или консольный fsearch) — закройте её и нажмите «Применить» в настройках"
+            .to_string()
+    } else {
+        message.to_string()
+    }
+}
+
+/// Как часто во время долгой индексации обновлять выдачу и счётчик: найденное сохраняется каждые 5 секунд.
+const REFRESH_EVERY_MS: u64 = 4000;
 
 impl Progress for GuiProgress {
     fn started(&self) {
@@ -72,9 +93,12 @@ impl Progress for GuiProgress {
         self.ctx.request_repaint();
     }
 
-    fn finished(&self, summary: &Summary) {
+    fn finished(&self, summary: Option<&Summary>) {
         self.state.running.store(false, Ordering::SeqCst);
-        *self.state.summary.lock().unwrap() = Some(summary.clone());
+        // Проход, завершившийся ошибкой, не должен затирать отчёт о последнем удачном.
+        if let Some(summary) = summary {
+            *self.state.summary.lock().unwrap() = Some(summary.clone());
+        }
         self.state.current.lock().unwrap().clear();
         self.state.phase.lock().unwrap().clear();
         self.state.generation.fetch_add(1, Ordering::SeqCst);
@@ -93,6 +117,15 @@ impl Progress for GuiProgress {
 
     fn file_done(&self, path: &Path, _status: &Status) {
         self.state.done.fetch_add(1, Ordering::Relaxed);
+        // Пока идёт проход, свежепроиндексированные файлы должны появляться в выдаче.
+        let now = self.started.elapsed().as_millis() as u64;
+        let last = self.last_refresh.load(Ordering::Relaxed);
+        if now.saturating_sub(last) >= REFRESH_EVERY_MS
+            && self.last_refresh.compare_exchange(last, now, Ordering::Relaxed, Ordering::Relaxed).is_ok()
+        {
+            self.state.generation.fetch_add(1, Ordering::SeqCst);
+            self.ctx.request_repaint();
+        }
         // Имя текущего файла — только для красоты: при конкуренции потоков пропускаем обновление.
         if let Ok(mut current) = self.state.current.try_lock() {
             *current = path.file_name().map(|n| n.to_string_lossy().into_owned()).unwrap_or_default();
@@ -151,6 +184,10 @@ fn search_worker(dir: PathBuf, rx: Receiver<Msg>, tx: Sender<Reply>, ctx: egui::
                 Err(e) => open_error = format!("{e:#}"),
             }
         }
+        // Читатель подхватывает коммит с задержкой — обновляем его явно, иначе после индексации видно старое.
+        if let Some(s) = &searcher {
+            s.reload();
+        }
         if want_count {
             let _ = tx.send(Reply::Count(searcher.as_ref().map_or(0, Searcher::num_docs)));
         }
@@ -170,15 +207,18 @@ fn search_worker(dir: PathBuf, rx: Receiver<Msg>, tx: Sender<Reply>, ctx: egui::
 pub struct Backend {
     pub state: Arc<IndexState>,
     pub replies: Receiver<Reply>,
-    search_tx: Sender<Msg>,
+    search_tx: Option<Sender<Msg>>,
+    worker: Option<JoinHandle<()>>,
     ctx: egui::Context,
     index_dir: PathBuf,
     cancel: Arc<AtomicBool>,
     indexer: Option<JoinHandle<()>>,
 }
 
-fn scan_options(settings: &Settings, roots: Vec<PathBuf>) -> Options {
+pub fn scan_options(settings: &Settings, roots: Vec<PathBuf>, index_dir: &Path) -> Options {
     let mut opts = Options::new(roots);
+    // Каталог индекса не индексируем, даже если он лежит внутри индексируемой папки.
+    opts.skip_dirs = vec![index_dir.to_path_buf()];
     opts.excludes = settings.excludes.clone();
     opts.default_excludes = settings.default_excludes;
     opts.limits = Limits { max_text_bytes: settings.max_text_mb.max(1) << 20, ..Limits::default() };
@@ -194,14 +234,15 @@ impl Backend {
         open_or_create_index(&index_dir)?;
         let (search_tx, search_rx) = channel();
         let (reply_tx, replies) = channel();
-        {
+        let worker = {
             let (dir, ctx) = (index_dir.clone(), ctx.clone());
-            thread::Builder::new().name("поиск".into()).spawn(move || search_worker(dir, search_rx, reply_tx, ctx))?;
-        }
+            thread::Builder::new().name("поиск".into()).spawn(move || search_worker(dir, search_rx, reply_tx, ctx))?
+        };
         let backend = Backend {
             state: Arc::new(IndexState::default()),
             replies,
-            search_tx,
+            search_tx: Some(search_tx),
+            worker: Some(worker),
             ctx,
             index_dir,
             cancel: Arc::new(AtomicBool::new(false)),
@@ -212,16 +253,20 @@ impl Backend {
     }
 
     pub fn search(&self, req: SearchRequest) {
-        let _ = self.search_tx.send(Msg::Search(req));
+        if let Some(tx) = &self.search_tx {
+            let _ = tx.send(Msg::Search(req));
+        }
     }
 
     pub fn request_count(&self) {
-        let _ = self.search_tx.send(Msg::Count);
+        if let Some(tx) = &self.search_tx {
+            let _ = tx.send(Msg::Count);
+        }
     }
 
     /// Запускает индексацию (и слежение, если оно включено). Прежняя индексация останавливается.
-    /// `removed` — папки, которые убрали из списка: их записи удаляются из индекса.
-    pub fn start_indexing(&mut self, settings: &Settings, removed: Vec<PathBuf>, force: bool) {
+    /// Записи папок из `settings.pending_removals` (их убрали из списка) удаляются из индекса.
+    pub fn start_indexing(&mut self, settings: &Settings, force: bool) {
         self.cancel.store(true, Ordering::SeqCst);
         let previous = self.indexer.take();
         let cancel = Arc::new(AtomicBool::new(false));
@@ -231,6 +276,8 @@ impl Backend {
         let ctx = self.ctx.clone();
         let dir = self.index_dir.clone();
         let settings = settings.clone();
+        let removed = settings.pending_removals.clone();
+        let epoch = state.epoch.fetch_add(1, Ordering::SeqCst) + 1;
         state.alive.store(true, Ordering::SeqCst);
 
         let spawned = thread::Builder::new().name("индексация".into()).spawn(move || {
@@ -240,13 +287,16 @@ impl Backend {
             }
             *state.error.lock().unwrap() = None;
             let result = run_indexing(&dir, &settings, removed, force, &state, &ctx, &cancel);
-            state.watching.store(false, Ordering::SeqCst);
-            state.running.store(false, Ordering::SeqCst);
-            state.alive.store(false, Ordering::SeqCst);
-            state.generation.fetch_add(1, Ordering::SeqCst);
-            if let Err(e) = result {
-                *state.error.lock().unwrap() = Some(format!("{e:#}"));
+            // Если поток уже заменили новым, флаги принадлежат новому — не трогаем их.
+            if state.epoch.load(Ordering::SeqCst) == epoch {
+                state.watching.store(false, Ordering::SeqCst);
+                state.running.store(false, Ordering::SeqCst);
+                state.alive.store(false, Ordering::SeqCst);
+                if let Err(e) = result {
+                    *state.error.lock().unwrap() = Some(friendly_error(&format!("{e:#}")));
+                }
             }
+            state.generation.fetch_add(1, Ordering::SeqCst);
             ctx.request_repaint();
         });
         match spawned {
@@ -263,15 +313,24 @@ impl Backend {
         self.cancel.store(true, Ordering::SeqCst);
     }
 
-    /// Останавливает фоновую работу и ждёт её недолго, чтобы индекс закрылся аккуратно.
-    pub fn shutdown(&mut self) {
+    /// Останавливает фоновую работу и ждёт её, чтобы индекс закрылся аккуратно.
+    /// Возвращает `false`, если индексация не остановилась за разумное время.
+    pub fn shutdown(&mut self) -> bool {
         self.stop_indexing();
-        for _ in 0..40 {
+        let mut stopped = false;
+        for _ in 0..100 {
             if !self.state.alive.load(Ordering::SeqCst) {
+                stopped = true;
                 break;
             }
             thread::sleep(Duration::from_millis(100));
         }
+        // Поток поиска завершается, когда закрыт канал; дожидаемся его, чтобы он отпустил файлы индекса.
+        self.search_tx = None;
+        if let Some(worker) = self.worker.take() {
+            let _ = worker.join();
+        }
+        stopped
     }
 }
 
@@ -287,6 +346,7 @@ fn run_indexing(
     let (index, fields) = open_or_create_index(dir)?;
     for root in &removed {
         indexer::remove_root(&index, &fields, root)?;
+        state.removed_done.lock().unwrap().push(root.clone());
         state.generation.fetch_add(1, Ordering::SeqCst);
     }
 
@@ -301,9 +361,14 @@ fn run_indexing(
         return Ok(());
     }
 
-    let mut opts = scan_options(settings, available);
+    let mut opts = scan_options(settings, available, dir);
     opts.force = force;
-    let progress = GuiProgress { state: state.clone(), ctx: ctx.clone() };
+    let progress = GuiProgress {
+        state: state.clone(),
+        ctx: ctx.clone(),
+        last_refresh: AtomicU64::new(0),
+        started: Instant::now(),
+    };
 
     if settings.watch {
         let mut watch = WatchOptions::new(opts);

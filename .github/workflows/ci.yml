@@ -15,15 +15,26 @@ jobs:
     strategy:
       fail-fast: false
       matrix:
-        os: [ubuntu-latest, windows-latest, macos-latest]
+        include:
+          - os: ubuntu-latest
+            rustflags: ""
+          # Статическая C-библиотека: exe из артефактов запускается без «Microsoft Visual C++ Redistributable».
+          - os: windows-latest
+            rustflags: "-C target-feature=+crt-static"
+          - os: macos-latest
+            rustflags: ""
     steps:
       - uses: actions/checkout@v4
       - uses: dtolnay/rust-toolchain@stable
       - uses: Swatinem/rust-cache@v2
       - name: Test
         run: cargo test --release
+        env:
+          RUSTFLAGS: ${{ matrix.rustflags }}
       - name: Build
         run: cargo build --release
+        env:
+          RUSTFLAGS: ${{ matrix.rustflags }}
       - name: Upload binary
         uses: actions/upload-artifact@v4
         with:

@@ -301,6 +301,11 @@ impl Searcher {
         Ok(stats)
     }
 
+    /// Подхватить последнюю сохранённую версию индекса (читатель сам обновляется с задержкой до полусекунды).
+    pub fn reload(&self) {
+        let _ = self.reader.reload();
+    }
+
     /// Сколько файлов сейчас в индексе (дёшево, в отличие от [`Searcher::stats`]).
     pub fn num_docs(&self) -> u64 {
         self.reader.searcher().num_docs()

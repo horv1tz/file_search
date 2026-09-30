@@ -83,7 +83,14 @@ pub fn badge(ext: &str, dark: bool) -> (Color32, String) {
 /// встроенные шрифты egui остаются запасными.
 pub fn install_fonts(ctx: &Context) {
     let mut fonts = FontDefinitions::default();
-    let candidates = [r"C:\Windows\Fonts\segoeui.ttf", "/System/Library/Fonts/Supplemental/Arial.ttf"];
+    // Windows может стоять не на диске C: — берём папку из переменной окружения.
+    let windir = std::env::var_os("WINDIR").or_else(|| std::env::var_os("SystemRoot"));
+    let mut candidates = Vec::new();
+    if let Some(windir) = windir {
+        candidates.push(std::path::PathBuf::from(windir).join("Fonts").join("segoeui.ttf"));
+    }
+    candidates.push(std::path::PathBuf::from(r"C:\Windows\Fonts\segoeui.ttf"));
+    candidates.push(std::path::PathBuf::from("/System/Library/Fonts/Supplemental/Arial.ttf"));
     for path in candidates {
         if let Ok(bytes) = std::fs::read(path) {
             fonts.font_data.insert("system-ui".into(), Arc::new(FontData::from_owned(bytes)));
@@ -105,6 +112,8 @@ pub fn apply(ctx: &Context, theme: Theme) {
         ctx.style_mut_of(egui_theme, |style| {
             style.spacing.item_spacing = egui::vec2(8.0, 6.0);
             style.spacing.button_padding = egui::vec2(10.0, 5.0);
+            // Выделяемые надписи перехватывали щелчки: по карточке результата не срабатывали двойной щелчок и меню.
+            style.interaction.selectable_labels = false;
             let v = &mut style.visuals;
             v.selection.bg_fill = p.accent.gamma_multiply(if dark { 0.45 } else { 0.25 });
             v.selection.stroke = egui::Stroke::new(1.0, p.accent);

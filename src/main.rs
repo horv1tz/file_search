@@ -85,8 +85,10 @@ struct ScanArgs {
 }
 
 impl ScanArgs {
-    fn options(&self, paths: Vec<PathBuf>) -> indexer::Options {
+    fn options(&self, paths: Vec<PathBuf>, index_dir: &Path) -> indexer::Options {
         let mut opts = indexer::Options::new(paths);
+        // Каталог индекса не индексируем, даже если он лежит внутри индексируемой папки.
+        opts.skip_dirs = vec![index_dir.to_path_buf()];
         opts.excludes = self.excludes.clone();
         opts.default_excludes = !self.no_default_excludes;
         if let Some(t) = self.threads {
@@ -298,7 +300,7 @@ fn cmd_watch(dir: &Path, a: WatchArgs) -> Result<()> {
     extract::install_quiet_panic_hook();
     let (index, fields) = open_or_create_index(dir)?;
     let cancel = install_ctrlc()?;
-    let mut opts = WatchOptions::new(a.scan.options(a.paths));
+    let mut opts = WatchOptions::new(a.scan.options(a.paths, dir));
     opts.rescan_every = Duration::from_secs(a.rescan_minutes.max(1) * 60);
     println!("Индекс: {}\nСлежение до Ctrl+C.", dir.display());
     watcher::watch(&index, &fields, &opts, &indexer::Silent, &watcher::log_line, &cancel)?;
@@ -312,7 +314,7 @@ fn cmd_serve(dir: &Path, a: ServeArgs) -> Result<()> {
         let (index, fields) = open_or_create_index(dir)?;
         let cancel = Arc::new(AtomicBool::new(false));
         let done = Arc::new(AtomicBool::new(false));
-        let opts = WatchOptions::new(a.scan.options(a.watch.clone()));
+        let opts = WatchOptions::new(a.scan.options(a.watch.clone(), dir));
         {
             let (cancel, done) = (cancel.clone(), done.clone());
             std::thread::spawn(move || {
@@ -343,7 +345,7 @@ fn cmd_index(dir: &Path, a: IndexArgs) -> Result<()> {
     extract::install_quiet_panic_hook();
     let (index, fields) = open_or_create_index(dir)?;
 
-    let mut opts = a.scan.options(a.paths);
+    let mut opts = a.scan.options(a.paths, dir);
     opts.force = a.force;
 
     let cancel = install_ctrlc()?;

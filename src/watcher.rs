@@ -13,11 +13,12 @@ use std::sync::mpsc::{RecvTimeoutError, channel};
 use std::time::{Duration, Instant};
 
 use anyhow::Result;
+use notify::event::ModifyKind;
 use notify::{EventKind, RecursiveMode, Watcher};
 use tantivy::Index;
 use tantivy::indexer::IndexWriterOptions;
 
-use crate::indexer::{self, Excluder, Options, Progress, delete_path, index_tree, normalize_root, upsert_file};
+use crate::indexer::{self, Excluder, Options, Progress, delete_path, index_tree, upsert_file, usable_roots};
 use crate::schema::Fields;
 
 pub struct WatchOptions {
@@ -63,6 +64,19 @@ fn rebase(path: PathBuf, aliases: &[(PathBuf, PathBuf)]) -> PathBuf {
     path
 }
 
+/// Событие говорит о появлении пути (создан, переименован, перемещён) — тогда новую папку нужно обойти целиком.
+/// Обычное «изменено» у папки (на Windows оно приходит при любой записи внутри) обходить не нужно:
+/// новые файлы в ней сообщат о себе сами.
+fn introduces_path(kind: &EventKind) -> bool {
+    matches!(kind, EventKind::Create(_) | EventKind::Modify(ModifyKind::Name(_)) | EventKind::Any | EventKind::Other)
+}
+
+struct Pending {
+    seen: Instant,
+    /// Если путь окажется папкой — обойти её целиком.
+    tree: bool,
+}
+
 fn stamp() -> String {
     chrono::Local::now().format("%H:%M:%S").to_string()
 }
@@ -76,8 +90,11 @@ pub fn watch(
     log: &dyn Fn(&str),
     cancel: &AtomicBool,
 ) -> Result<()> {
-    let roots: Vec<PathBuf> = opts.index.roots.iter().map(|r| normalize_root(r)).collect::<Result<_>>()?;
-    let excluder = Excluder::new(&opts.index.excludes, opts.index.default_excludes)?;
+    let (roots, problems) = usable_roots(&opts.index.roots)?;
+    for problem in problems {
+        log(&format!("Пропущено: {problem}"));
+    }
+    let excluder = Excluder::new(&opts.index.excludes, opts.index.default_excludes, &opts.index.skip_dirs)?;
     let aliases = root_aliases(&roots);
 
     log("Первичная проверка индекса…");
@@ -103,7 +120,7 @@ pub fn watch(
         }
     }
 
-    let mut pending: HashMap<PathBuf, Instant> = HashMap::new();
+    let mut pending: HashMap<PathBuf, Pending> = HashMap::new();
     let mut last_indexed: HashMap<PathBuf, Instant> = HashMap::new();
     let mut rescan_needed = false;
     let mut last_scan = Instant::now();
@@ -116,8 +133,16 @@ pub fn watch(
                 if event.need_rescan() {
                     rescan_needed = true;
                 } else if !matches!(event.kind, EventKind::Access(_)) {
+                    let tree = introduces_path(&event.kind);
                     for p in event.paths {
-                        pending.insert(rebase(p, &aliases), Instant::now());
+                        let p = rebase(p, &aliases);
+                        // Сразу отбрасываем служебное: файлы самого индекса, блокировки Office, исключённые папки.
+                        if excluder.excluded_in_roots(&p, false, &roots) {
+                            continue;
+                        }
+                        let entry = pending.entry(p).or_insert(Pending { seen: Instant::now(), tree });
+                        entry.seen = Instant::now();
+                        entry.tree |= tree;
                     }
                 }
             }
@@ -131,25 +156,23 @@ pub fn watch(
         }
 
         let now = Instant::now();
-        // Файлы, в которые постоянно пишут, не переразбираем чаще min_reindex_interval.
-        // Удаления и папки применяются сразу: они дёшевы.
-        let ready: Vec<PathBuf> = pending
+        // Файлы и папки, которые постоянно меняются, не переразбираем чаще min_reindex_interval.
+        // Удаления применяются сразу: они дёшевы.
+        let ready: Vec<(PathBuf, bool)> = pending
             .iter()
-            .filter(|(_, seen)| now.duration_since(**seen) >= opts.debounce)
+            .filter(|(_, p)| now.duration_since(p.seen) >= opts.debounce)
             .filter(|(path, _)| match last_indexed.get(*path) {
-                Some(t) if now.duration_since(*t) < opts.min_reindex_interval => {
-                    !fs::symlink_metadata(path).is_ok_and(|m| m.is_file())
-                }
+                Some(t) if now.duration_since(*t) < opts.min_reindex_interval => fs::symlink_metadata(path).is_err(),
                 _ => true,
             })
-            .map(|(p, _)| p.clone())
+            .map(|(path, p)| (path.clone(), p.tree))
             .collect();
         if !ready.is_empty() {
-            for p in &ready {
-                pending.remove(p);
-                last_indexed.insert(p.clone(), now);
+            for (path, _) in &ready {
+                pending.remove(path);
+                last_indexed.insert(path.clone(), now);
             }
-            match apply(index, fields, opts, &excluder, &roots, &ready) {
+            match apply(index, fields, opts, &excluder, &roots, &ready, cancel) {
                 Ok((updated, removed)) if updated + removed > 0 => {
                     log(&format!("Обновлено: {updated}, удалено: {removed}"))
                 }
@@ -184,12 +207,16 @@ fn apply(
     opts: &WatchOptions,
     excluder: &Excluder,
     roots: &[PathBuf],
-    paths: &[PathBuf],
+    items: &[(PathBuf, bool)],
+    cancel: &AtomicBool,
 ) -> Result<(u64, u64)> {
     let writer_opts = IndexWriterOptions::builder().num_worker_threads(1).memory_budget_per_thread(48 << 20).build();
     let mut writer = index.writer_with_options::<tantivy::TantivyDocument>(writer_opts)?;
     let (mut updated, mut removed) = (0u64, 0u64);
-    for path in paths {
+    for (path, tree) in items {
+        if cancel.load(Ordering::Relaxed) {
+            break;
+        }
         match fs::symlink_metadata(path) {
             Ok(meta) if meta.is_file() => {
                 if excluder.excluded_in_roots(path, false, roots) {
@@ -198,9 +225,10 @@ fn apply(
                 upsert_file(&writer, fields, path, &meta, &opts.index.limits)?;
                 updated += 1;
             }
+            // Папка: целиком обходим только появившуюся или переименованную, простое «изменена» игнорируем.
             Ok(meta) if meta.is_dir() => {
-                if !excluder.excluded_in_roots(path, true, roots) {
-                    updated += index_tree(&writer, fields, path, excluder, &opts.index.limits)?;
+                if *tree && !excluder.excluded_in_roots(path, true, roots) {
+                    updated += index_tree(&writer, fields, path, excluder, &opts.index.limits, cancel)?;
                 }
             }
             Ok(_) => {}
@@ -212,7 +240,9 @@ fn apply(
     }
     writer.commit()?;
     // Слияние мелких сегментов, чтобы поиск не замедлялся за долгую работу.
-    writer.wait_merging_threads()?;
+    if !cancel.load(Ordering::Relaxed) {
+        writer.wait_merging_threads()?;
+    }
     Ok((updated, removed))
 }
 
@@ -234,6 +264,18 @@ mod tests {
             rebase(PathBuf::from("/private/var/docs2/x.txt"), &aliases),
             PathBuf::from("/private/var/docs2/x.txt")
         );
+    }
+
+    #[test]
+    fn only_new_paths_trigger_a_tree_walk() {
+        use notify::event::{CreateKind, DataChange, MetadataKind, RenameMode};
+        assert!(introduces_path(&EventKind::Create(CreateKind::Any)));
+        assert!(introduces_path(&EventKind::Modify(ModifyKind::Name(RenameMode::To))));
+        // На Windows «папка изменена» приходит при любой записи внутри неё — обходить её заново нельзя.
+        assert!(!introduces_path(&EventKind::Modify(ModifyKind::Any)));
+        assert!(!introduces_path(&EventKind::Modify(ModifyKind::Data(DataChange::Any))));
+        assert!(!introduces_path(&EventKind::Modify(ModifyKind::Metadata(MetadataKind::Any))));
+        assert!(!introduces_path(&EventKind::Remove(notify::event::RemoveKind::Any)));
     }
 
     #[test]

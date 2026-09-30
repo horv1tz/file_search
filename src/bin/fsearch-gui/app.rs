@@ -12,7 +12,7 @@ use file_search::schema::default_index_dir;
 use file_search::search::{Hit, SearchOptions, Sort};
 
 use crate::backend::{Backend, Reply, SearchRequest};
-use crate::settings::{Settings, settings_path};
+use crate::settings::{Settings, Theme, settings_path};
 use crate::theme::{self, GROUPS};
 use crate::{settings_ui, views};
 
@@ -50,7 +50,7 @@ impl Form {
         self.query.trim().is_empty() && !self.groups.iter().any(|g| *g) && self.dir.is_none()
     }
 
-    pub fn options(&self, offset: usize) -> SearchOptions {
+    pub fn options(&self, offset: usize, limit: usize) -> SearchOptions {
         let exts = GROUPS
             .iter()
             .zip(&self.groups)
@@ -62,7 +62,7 @@ impl Form {
             mode: self.mode,
             exts,
             dirs: self.dir.iter().cloned().collect(),
-            limit: PAGE,
+            limit,
             offset,
             sort: self.sort,
             snippets: true,
@@ -122,9 +122,14 @@ pub struct App {
     pub focus_search: bool,
     toast: Option<(String, Instant)>,
     pub places: Vec<(String, PathBuf)>,
-    places_rx: Receiver<Vec<(String, PathBuf)>>,
+    places_rx: Receiver<(String, PathBuf)>,
     dialog_tx: Sender<DialogResult>,
     dialog_rx: Receiver<DialogResult>,
+    /// Диалог выбора папки уже открыт: второй не открываем.
+    dialog_open: bool,
+    toast_tx: Sender<String>,
+    toast_rx: Receiver<String>,
+    applied_theme: Theme,
     pub excludes_text: String,
     pub confirm_reset: bool,
 
@@ -134,6 +139,8 @@ pub struct App {
 enum DialogResult {
     Root(PathBuf),
     FilterFolder(PathBuf),
+    /// Диалог закрыт (выбрали папку или отказались).
+    Closed,
 }
 
 struct ScreenshotPlan {
@@ -150,32 +157,39 @@ fn open_error_text(e: &std::io::Error) -> String {
     }
 }
 
-/// Типовые места для быстрого добавления: диски, «Документы», «Рабочий стол», «Загрузки».
-fn discover_places() -> Vec<(String, PathBuf)> {
-    let mut places = Vec::new();
+/// Запускает поиск типовых мест для быстрого добавления: «Документы», «Рабочий стол», «Загрузки» и диски.
+/// Каждый диск проверяется в своём потоке: отключённый сетевой диск отвечает секундами и не должен
+/// задерживать остальные кнопки.
+fn discover_places(tx: Sender<(String, PathBuf)>, ctx: Context) {
+    let send = move |tx: &Sender<(String, PathBuf)>, ctx: &Context, item: (String, PathBuf)| {
+        let _ = tx.send(item);
+        ctx.request_repaint();
+    };
     if cfg!(windows) {
         for letter in b'A'..=b'Z' {
-            let root = PathBuf::from(format!("{}:\\", letter as char));
-            if root.exists() {
-                places.push((format!("Диск {}:", letter as char), root));
+            let (tx, ctx) = (tx.clone(), ctx.clone());
+            std::thread::spawn(move || {
+                let root = PathBuf::from(format!("{}:\\", letter as char));
+                if root.exists() {
+                    send(&tx, &ctx, (format!("Диск {}:", letter as char), root));
+                }
+            });
+        }
+    } else {
+        send(&tx, &ctx, ("Корень /".to_string(), PathBuf::from("/")));
+    }
+    std::thread::spawn(move || {
+        for (name, dir) in [
+            ("Документы", dirs::document_dir()),
+            ("Рабочий стол", dirs::desktop_dir()),
+            ("Загрузки", dirs::download_dir()),
+            ("Домашняя папка", dirs::home_dir()),
+        ] {
+            if let Some(dir) = dir.filter(|d| d.is_dir()) {
+                send(&tx, &ctx, (name.to_string(), dir));
             }
         }
-    } else if Path::new("/").exists() {
-        places.push(("Корень /".to_string(), PathBuf::from("/")));
-    }
-    for (name, dir) in [
-        ("Документы", dirs::document_dir()),
-        ("Рабочий стол", dirs::desktop_dir()),
-        ("Загрузки", dirs::download_dir()),
-        ("Домашняя папка", dirs::home_dir()),
-    ] {
-        if let Some(dir) = dir.filter(|d| d.is_dir())
-            && !places.iter().any(|(_, p)| *p == dir)
-        {
-            places.push((name.to_string(), dir));
-        }
-    }
-    places
+    });
 }
 
 impl App {
@@ -188,6 +202,7 @@ impl App {
         }
         theme::apply(ctx, settings.theme);
         let index_dir = settings.index_dir.clone().unwrap_or_else(default_index_dir);
+        let settings_theme = settings.theme;
 
         let (backend, backend_error) = match Backend::new(ctx.clone(), index_dir.clone()) {
             Ok(b) => (Some(b), None),
@@ -196,14 +211,9 @@ impl App {
 
         // Поиск мест может зависнуть на недоступном сетевом диске, поэтому делаем это в фоне.
         let (places_tx, places_rx) = channel();
-        {
-            let ctx = ctx.clone();
-            std::thread::spawn(move || {
-                let _ = places_tx.send(discover_places());
-                ctx.request_repaint();
-            });
-        }
+        discover_places(places_tx, ctx.clone());
         let (dialog_tx, dialog_rx) = channel();
+        let (toast_tx, toast_rx) = channel();
 
         let mut app = App {
             backend,
@@ -235,6 +245,10 @@ impl App {
             places_rx,
             dialog_tx,
             dialog_rx,
+            dialog_open: false,
+            toast_tx,
+            toast_rx,
+            applied_theme: settings_theme,
             confirm_reset: false,
             screenshot: launch.screenshot.map(|path| ScreenshotPlan {
                 path,
@@ -242,17 +256,17 @@ impl App {
                 started: Instant::now(),
             }),
         };
-        if !app.settings.roots.is_empty() {
-            app.start_indexing(Vec::new(), false);
+        if !app.settings.roots.is_empty() || !app.settings.pending_removals.is_empty() {
+            app.start_indexing(false);
         }
         app
     }
 
     // ------------------------------------------------------------ индексация и настройки
 
-    fn start_indexing(&mut self, removed: Vec<PathBuf>, force: bool) {
+    fn start_indexing(&mut self, force: bool) {
         if let Some(backend) = &mut self.backend {
-            backend.start_indexing(&self.settings, removed, force);
+            backend.start_indexing(&self.settings, force);
         }
     }
 
@@ -263,18 +277,29 @@ impl App {
     }
 
     /// Применяет настройки: сохраняет и перезапускает индексацию.
-    fn apply_settings(&mut self, ctx: &Context, removed: Vec<PathBuf>, force: bool) {
+    fn apply_settings(&mut self, ctx: &Context, force: bool) {
         self.settings.excludes =
             self.excludes_text.lines().map(str::trim).filter(|l| !l.is_empty()).map(str::to_string).collect();
         theme::apply(ctx, self.settings.theme);
+        self.applied_theme = self.settings.theme;
         self.save_settings();
-        self.start_indexing(removed, force);
+        self.start_indexing(force);
         self.mark_dirty(true);
     }
 
     fn recreate_index(&mut self, ctx: &Context) {
-        if let Some(backend) = &mut self.backend {
-            backend.shutdown();
+        // Удаляем только каталог, который действительно является индексом программы: путь берётся из настроек,
+        // и ошибка в нём не должна стоить пользователю случайной папки.
+        let is_index = self.index_dir.join("fsearch.version").exists() || self.index_dir.join("meta.json").exists();
+        if !is_index {
+            self.toast(format!("{} не похож на индекс программы — удалять не буду", self.index_dir.display()));
+            return;
+        }
+        if let Some(backend) = &mut self.backend
+            && !backend.shutdown()
+        {
+            self.toast("Индексация ещё не остановилась — подождите несколько секунд и повторите");
+            return;
         }
         self.backend = None;
         if let Err(e) = std::fs::remove_dir_all(&self.index_dir)
@@ -291,7 +316,7 @@ impl App {
                 self.total = 0;
                 self.num_docs = 0;
                 self.last_generation = 0;
-                self.start_indexing(Vec::new(), true);
+                self.start_indexing(true);
                 self.toast("Индекс пересоздан");
             }
             Err(e) => self.backend_error = Some(format!("{e:#}")),
@@ -299,6 +324,11 @@ impl App {
     }
 
     // ------------------------------------------------------------ поиск
+
+    /// Новый запрос набран, но ответа на него ещё нет: список на экране относится к прежнему запросу.
+    pub fn pending(&self) -> bool {
+        self.searching || self.dirty_at.is_some()
+    }
 
     /// Запросить поиск после короткой паузы в наборе.
     pub fn mark_dirty(&mut self, silent: bool) {
@@ -330,12 +360,20 @@ impl App {
             self.searching = true;
         }
         let offset = if append { self.results.len() } else { 0 };
-        backend.search(SearchRequest { id: self.current_id, opts: self.form.options(offset), append });
+        // Фоновое обновление не должно сворачивать уже подгруженный список обратно до первой страницы.
+        let limit = if !append && self.silent_refresh { self.results.len().clamp(PAGE, 500) } else { PAGE };
+        backend.search(SearchRequest { id: self.current_id, opts: self.form.options(offset, limit), append });
     }
 
     fn poll(&mut self, ctx: &Context) {
-        if let Ok(places) = self.places_rx.try_recv() {
-            self.places = places;
+        while let Ok(place) = self.places_rx.try_recv() {
+            if !self.places.iter().any(|(_, p)| *p == place.1) {
+                self.places.push(place);
+                self.places.sort_by(|a, b| a.0.cmp(&b.0));
+            }
+        }
+        while let Ok(text) = self.toast_rx.try_recv() {
+            self.toast(text);
         }
         while let Ok(done) = self.dialog_rx.try_recv() {
             match done {
@@ -344,7 +382,21 @@ impl App {
                     self.form.dir = Some(path.to_string_lossy().into_owned());
                     self.mark_dirty(false);
                 }
+                DialogResult::Closed => {
+                    self.dialog_open = false;
+                    self.focus_search = true;
+                }
             }
+        }
+        // Папки, записи которых уже удалены из индекса, больше не нужно помнить.
+        let removed_done: Vec<PathBuf> = self
+            .backend
+            .as_ref()
+            .map(|b| std::mem::take(&mut *b.state.removed_done.lock().unwrap()))
+            .unwrap_or_default();
+        if !removed_done.is_empty() {
+            self.settings.pending_removals.retain(|r| !removed_done.contains(r));
+            self.save_settings();
         }
         let Some(backend) = &self.backend else { return };
         while let Ok(reply) = backend.replies.try_recv() {
@@ -407,13 +459,38 @@ impl App {
         self.results.get(index).map(|h| PathBuf::from(&h.path))
     }
 
-    fn pick_folder(&self, ctx: &Context, for_filter: bool) {
+    fn pick_folder(&mut self, ctx: &Context, for_filter: bool) {
+        if self.dialog_open {
+            return;
+        }
+        self.dialog_open = true;
         let (tx, ctx) = (self.dialog_tx.clone(), ctx.clone());
         std::thread::spawn(move || {
             let title =
                 if for_filter { "Искать только в папке" } else { "Папка для поиска" };
             if let Some(path) = rfd::FileDialog::new().set_title(title).pick_folder() {
                 let _ = tx.send(if for_filter { DialogResult::FilterFolder(path) } else { DialogResult::Root(path) });
+            }
+            let _ = tx.send(DialogResult::Closed);
+            ctx.request_repaint();
+        });
+    }
+
+    /// Открывает файл (или показывает его в проводнике) в фоне: проверка пути на недоступном сетевом диске
+    /// может занять секунды и не должна замораживать окно.
+    fn open_in_background(&self, ctx: &Context, path: PathBuf, reveal: bool) {
+        let (tx, ctx) = (self.toast_tx.clone(), ctx.clone());
+        std::thread::spawn(move || {
+            let problem = if !path.exists() {
+                Some("Файла уже нет на диске: его удалили или переместили".to_string())
+            } else if !reveal && !platform::is_safe_to_open(&path) {
+                Some("Исполняемые файлы не запускаются отсюда — используйте «В папке»".to_string())
+            } else {
+                let result = if reveal { platform::reveal_path(&path) } else { platform::open_path(&path) };
+                result.err().map(|e| open_error_text(&e))
+            };
+            if let Some(text) = problem {
+                let _ = tx.send(text);
                 ctx.request_repaint();
             }
         });
@@ -424,22 +501,12 @@ impl App {
             Action::Select(i) => self.selected = Some(i),
             Action::Open(i) => {
                 if let Some(path) = self.hit_path(i) {
-                    if !path.exists() {
-                        self.toast("Файла уже нет на диске: его удалили или переместили");
-                    } else if !platform::is_safe_to_open(&path) {
-                        self.toast("Исполняемые файлы не запускаются отсюда — используйте «В папке»");
-                    } else if let Err(e) = platform::open_path(&path) {
-                        self.toast(open_error_text(&e));
-                    }
+                    self.open_in_background(ctx, path, false);
                 }
             }
             Action::Reveal(i) => {
                 if let Some(path) = self.hit_path(i) {
-                    if !path.exists() {
-                        self.toast("Файла уже нет на диске: его удалили или переместили");
-                    } else if let Err(e) = platform::reveal_path(&path) {
-                        self.toast(open_error_text(&e));
-                    }
+                    self.open_in_background(ctx, path, true);
                 }
             }
             Action::CopyPath(i) => {
@@ -471,7 +538,7 @@ impl App {
             }
             Action::AddRoot(path) => {
                 if self.settings.add_root(path) {
-                    self.apply_settings(ctx, Vec::new(), false);
+                    self.apply_settings(ctx, false);
                     self.toast("Папка добавлена, идёт индексация");
                 } else {
                     self.toast("Эта папка уже входит в список");
@@ -480,14 +547,17 @@ impl App {
             Action::PickRoot => self.pick_folder(ctx, false),
             Action::PickFilterFolder => self.pick_folder(ctx, true),
             Action::RemoveRoot(i) => {
-                if i < self.settings.roots.len() {
-                    let removed = self.settings.roots.remove(i);
-                    self.apply_settings(ctx, vec![removed], false);
+                if self.settings.remove_root(i).is_some() {
+                    self.apply_settings(ctx, false);
                 }
             }
             Action::OpenSettings => self.show_settings = true,
-            Action::CloseSettings => self.show_settings = false,
-            Action::ApplySettings { force } => self.apply_settings(ctx, Vec::new(), force),
+            Action::CloseSettings => {
+                self.show_settings = false;
+                self.confirm_reset = false;
+                self.focus_search = true;
+            }
+            Action::ApplySettings { force } => self.apply_settings(ctx, force),
             Action::StopIndexing => {
                 if let Some(backend) = &mut self.backend {
                     backend.stop_indexing();
@@ -513,7 +583,7 @@ impl App {
         if ctx.input_mut(|i| i.consume_key(Modifiers::COMMAND, Key::F) || i.consume_key(Modifiers::COMMAND, Key::L)) {
             self.focus_search = true;
         }
-        if typing_elsewhere || self.show_settings {
+        if typing_elsewhere || self.show_settings || egui::Popup::is_any_open(ctx) {
             return actions;
         }
 
@@ -550,7 +620,7 @@ impl App {
                 self.load_more();
             }
         }
-        if !self.results.is_empty() {
+        if !self.results.is_empty() && !self.pending() {
             let target = self.selected.unwrap_or(0);
             if reveal {
                 actions.push(Action::Reveal(target));
@@ -606,6 +676,11 @@ impl App {
 impl eframe::App for App {
     fn update(&mut self, ctx: &Context, _frame: &mut eframe::Frame) {
         self.poll(ctx);
+        // Тема применяется сразу при выборе, не дожидаясь «Применить» (которое перезапускает индексацию).
+        if self.settings.theme != self.applied_theme {
+            theme::apply(ctx, self.settings.theme);
+            self.applied_theme = self.settings.theme;
+        }
         let mut actions = self.handle_keys(ctx);
 
         // Папку можно перетащить в окно из проводника — она попадёт в список «Где искать».
@@ -656,7 +731,8 @@ impl eframe::App for App {
 impl App {
     /// Подгрузить следующую страницу, когда пользователь докрутил до конца списка.
     pub fn load_more(&mut self) {
-        if self.results.len() < self.total {
+        // Пока идёт новый запрос, подгружать к старому списку нечего: ответы перепутались бы.
+        if self.results.len() < self.total && !self.pending() {
             self.dispatch_search(true);
         }
     }
@@ -684,7 +760,7 @@ mod tests {
         form.mode = Mode::Content;
         form.sort = Sort::Newest;
         form.dir = Some("D:\\Работа".into());
-        let opts = form.options(80);
+        let opts = form.options(80, PAGE);
         assert_eq!(opts.query, "договор");
         assert_eq!(opts.offset, 80);
         assert_eq!(opts.limit, PAGE);

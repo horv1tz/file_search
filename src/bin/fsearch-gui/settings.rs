@@ -30,6 +30,8 @@ pub struct Settings {
     pub index_dir: Option<PathBuf>,
     /// Период полной проверки в режиме слежения, минут.
     pub rescan_minutes: u64,
+    /// Папки, убранные из списка, записи которых ещё не удалены из индекса (удаление повторяется при запуске).
+    pub pending_removals: Vec<PathBuf>,
 }
 
 impl Default for Settings {
@@ -43,6 +45,7 @@ impl Default for Settings {
             theme: Theme::Auto,
             index_dir: None,
             rescan_minutes: 30,
+            pending_removals: Vec::new(),
         }
     }
 }
@@ -73,9 +76,23 @@ impl Settings {
         if self.roots.iter().any(|r| root.starts_with(r)) {
             return false;
         }
+        // Папка, вернувшаяся в список, больше не ждёт удаления из индекса.
+        self.pending_removals.retain(|r| !r.starts_with(&root) && !root.starts_with(r));
         self.roots.retain(|r| !r.starts_with(&root));
         self.roots.push(root);
         true
+    }
+
+    /// Убирает папку из списка поиска; её записи удалятся из индекса при следующей индексации.
+    pub fn remove_root(&mut self, index: usize) -> Option<PathBuf> {
+        if index >= self.roots.len() {
+            return None;
+        }
+        let root = self.roots.remove(index);
+        if !self.pending_removals.contains(&root) {
+            self.pending_removals.push(root.clone());
+        }
+        Some(root)
     }
 }
 
@@ -101,6 +118,18 @@ mod tests {
             !partial.watch && partial.default_excludes && partial.max_text_mb == 16,
             "новые поля берут значения по умолчанию"
         );
+    }
+
+    #[test]
+    fn removed_roots_wait_for_index_cleanup_until_readded() {
+        let mut s = Settings::default();
+        s.add_root(PathBuf::from("/data/a"));
+        s.add_root(PathBuf::from("/data/b"));
+        assert_eq!(s.remove_root(0), Some(PathBuf::from("/data/a")));
+        assert_eq!(s.pending_removals, [PathBuf::from("/data/a")]);
+        assert_eq!(s.remove_root(9), None);
+        assert!(s.add_root(PathBuf::from("/data/a/sub")), "папку (или её часть) вернули — удаление отменяется");
+        assert!(s.pending_removals.is_empty());
     }
 
     #[test]

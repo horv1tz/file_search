@@ -89,3 +89,44 @@ fn watch_applies_creates_changes_moves_and_deletes() {
     cancel.store(true, Ordering::SeqCst);
     worker.join().unwrap().unwrap();
 }
+
+#[test]
+fn watcher_does_not_index_its_own_index_folder() {
+    let docs = TempDir::new().unwrap();
+    fs::write(docs.path().join("a.txt"), "начальный документ про Рысь").unwrap();
+    // Индекс лежит внутри наблюдаемой папки — худший случай (на Windows так бывает, если индексировать весь диск C:).
+    let index_dir = docs.path().join(".index");
+    let (index, fields) = open_or_create_index(&index_dir).unwrap();
+
+    let mut options = Options::new(vec![docs.path().to_path_buf()]);
+    options.skip_dirs = vec![index_dir.clone()];
+    let mut opts = WatchOptions::new(options);
+    opts.debounce = Duration::from_millis(200);
+
+    let updates = Arc::new(std::sync::Mutex::new(0usize));
+    let cancel = Arc::new(AtomicBool::new(false));
+    let worker = {
+        let (cancel, updates) = (cancel.clone(), updates.clone());
+        thread::spawn(move || {
+            let log = move |line: &str| {
+                if line.starts_with("Обновлено") {
+                    *updates.lock().unwrap() += 1;
+                }
+            };
+            watcher::watch(&index, &fields, &opts, &file_search::indexer::Silent, &log, &cancel)
+        })
+    };
+    let q = |query: &str| names(&index_dir, query);
+    wait_until("первичная индексация", || q("Рысь").len() == 1);
+
+    fs::write(docs.path().join("b.txt"), "второй документ про Куницу").unwrap();
+    wait_until("новый файл", || q("Куницу").len() == 1);
+    // Если бы файлы индекса попадали в очередь, коммиты порождали бы всё новые обновления.
+    thread::sleep(Duration::from_secs(4));
+    let count = *updates.lock().unwrap();
+    assert_eq!(count, 1, "ровно одно обновление (новый файл), без самоподпитки; было {count}");
+    assert_eq!(q("Рысь").len(), 1);
+
+    cancel.store(true, Ordering::SeqCst);
+    worker.join().unwrap().unwrap();
+}
