@@ -14,8 +14,21 @@ struct Group {
 
 /// Группы, чьё содержимое не является текстом документа.
 const SKIP_DESTINATIONS: [&str; 16] = [
-    "fonttbl", "colortbl", "stylesheet", "info", "pict", "object", "themedata", "colorschememapping",
-    "latentstyles", "datastore", "listtable", "listoverridetable", "rsidtbl", "generator", "xmlnstbl",
+    "fonttbl",
+    "colortbl",
+    "stylesheet",
+    "info",
+    "pict",
+    "object",
+    "themedata",
+    "colorschememapping",
+    "latentstyles",
+    "datastore",
+    "listtable",
+    "listoverridetable",
+    "rsidtbl",
+    "generator",
+    "xmlnstbl",
     "fldinst",
 ];
 
@@ -123,7 +136,8 @@ pub fn extract(data: &[u8], out: &mut Doc) {
                         while i < data.len() && data[i].is_ascii_digit() {
                             i += 1;
                         }
-                        let num: Option<i64> = std::str::from_utf8(&data[num_start..i]).ok().and_then(|s| s.parse().ok());
+                        let num: Option<i64> =
+                            std::str::from_utf8(&data[num_start..i]).ok().and_then(|s| s.parse().ok());
                         if data.get(i) == Some(&b' ') {
                             i += 1;
                         }
@@ -193,7 +207,8 @@ mod tests {
 
     #[test]
     fn cp1251_bytes() {
-        let t = run(b"{\\rtf1\\ansi\\ansicpg1251 {\\colortbl;\\red0\\green0\\blue0;}\\'e4\\'ee\\'e3\\'ee\\'e2\\'ee\\'f0}");
+        let t =
+            run(b"{\\rtf1\\ansi\\ansicpg1251 {\\colortbl;\\red0\\green0\\blue0;}\\'e4\\'ee\\'e3\\'ee\\'e2\\'ee\\'f0}");
         assert_eq!(t, "договор");
     }
 

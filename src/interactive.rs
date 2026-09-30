@@ -64,7 +64,12 @@ pub fn run(searcher: &Searcher, base: SearchOptions) -> Result<()> {
                     opts.offset = opts.offset.saturating_sub(opts.limit);
                     show(searcher, &opts, &last_query, &mut hits, &mut total);
                 }
-                "open" | "dir" => match arg.parse::<usize>().ok().and_then(|n| n.checked_sub(1 + opts.offset)).and_then(|i| hits.get(i)) {
+                "open" | "dir" => match arg
+                    .parse::<usize>()
+                    .ok()
+                    .and_then(|n| n.checked_sub(1 + opts.offset))
+                    .and_then(|i| hits.get(i))
+                {
                     Some(hit) => {
                         let path = PathBuf::from(&hit.path);
                         let res = if name == "open" { open_path(&path) } else { reveal_path(&path) };
@@ -75,8 +80,19 @@ pub fn run(searcher: &Searcher, base: SearchOptions) -> Result<()> {
                     None => println!("Укажите номер результата с текущей страницы, например: :{name} 2"),
                 },
                 "ext" => {
-                    opts.exts = arg.split(',').map(|e| e.trim().trim_start_matches('.').to_lowercase()).filter(|e| !e.is_empty()).collect();
-                    println!("{}", if opts.exts.is_empty() { "Фильтр по типам снят.".to_string() } else { format!("Типы: {}", opts.exts.join(", ")) });
+                    opts.exts = arg
+                        .split(',')
+                        .map(|e| e.trim().trim_start_matches('.').to_lowercase())
+                        .filter(|e| !e.is_empty())
+                        .collect();
+                    println!(
+                        "{}",
+                        if opts.exts.is_empty() {
+                            "Фильтр по типам снят.".to_string()
+                        } else {
+                            format!("Типы: {}", opts.exts.join(", "))
+                        }
+                    );
                 }
                 "name" => opts.mode = Mode::Name,
                 "content" => opts.mode = Mode::Content,
@@ -109,4 +125,3 @@ fn show(searcher: &Searcher, opts: &SearchOptions, query: &str, hits: &mut Vec<H
         Err(e) => println!("Ошибка поиска: {e:#}"),
     }
 }
-

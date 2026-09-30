@@ -4,11 +4,11 @@ use std::fs;
 use std::path::{Path, PathBuf};
 
 use anyhow::{Context, Result, bail};
+use tantivy::Index;
 use tantivy::directory::MmapDirectory;
 use tantivy::schema::{
     FAST, Field, INDEXED, IndexRecordOption, STORED, STRING, Schema, TextFieldIndexing, TextOptions,
 };
-use tantivy::Index;
 
 use crate::analyzer::{self, ANALYZER_VERSION, RAW_TOKENIZER_NAME, TOKENIZER_NAME};
 
@@ -79,11 +79,7 @@ pub fn default_index_dir() -> PathBuf {
 
 /// Нормализованный ключ пути: на Windows и macOS регистр не различается, разделитель всегда `/`.
 pub fn path_key(path: &str) -> String {
-    if cfg!(any(windows, target_os = "macos")) {
-        path.replace('\\', "/").to_lowercase()
-    } else {
-        path.to_string()
-    }
+    if cfg!(any(windows, target_os = "macos")) { path.replace('\\', "/").to_lowercase() } else { path.to_string() }
 }
 
 fn register(index: &Index) {

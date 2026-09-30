@@ -83,7 +83,11 @@ fn pptx_slides_follow_presentation_order_not_file_names() {
     let dir = TempDir::new().unwrap();
     let pres = r#"<p:presentation xmlns:p="http://schemas.openxmlformats.org/presentationml/2006/main" xmlns:r="http://schemas.openxmlformats.org/officeDocument/2006/relationships"><p:sldIdLst><p:sldId id="300" r:id="rId9"/><p:sldId id="256" r:id="rId2"/></p:sldIdLst></p:presentation>"#;
     let rels = r#"<Relationships xmlns="http://schemas.openxmlformats.org/package/2006/relationships"><Relationship Id="rId2" Type="http://schemas.openxmlformats.org/officeDocument/2006/relationships/slide" Target="slides/slide1.xml"/><Relationship Id="rId9" Type="http://schemas.openxmlformats.org/officeDocument/2006/relationships/slide" Target="slides/slide2.xml"/></Relationships>"#;
-    let slide = |t: &str| format!(r#"<p:sld xmlns:a="http://schemas.openxmlformats.org/drawingml/2006/main" xmlns:p="http://schemas.openxmlformats.org/presentationml/2006/main"><a:p><a:r><a:t>{t}</a:t></a:r></a:p><a:fld type="slidenum"><a:t>‹#›</a:t></a:fld></p:sld>"#);
+    let slide = |t: &str| {
+        format!(
+            r#"<p:sld xmlns:a="http://schemas.openxmlformats.org/drawingml/2006/main" xmlns:p="http://schemas.openxmlformats.org/presentationml/2006/main"><a:p><a:r><a:t>{t}</a:t></a:r></a:p><a:fld type="slidenum"><a:t>‹#›</a:t></a:fld></p:sld>"#
+        )
+    };
     let (s1, s2) = (slide("файл первый"), slide("файл второй"));
     let path = zip_file(
         &dir,
@@ -138,12 +142,15 @@ fn broken_files_never_panic_and_report_failure() {
         let e = run(&path);
         assert!(matches!(e.status, Status::Failed(_) | Status::Empty), "{name}: {:?}", e.status);
     }
-    assert_eq!(run(&{
-        let p = dir.path().join("empty.docx");
-        File::create(&p).unwrap();
-        p
-    })
-    .status, Status::Empty);
+    assert_eq!(
+        run(&{
+            let p = dir.path().join("empty.docx");
+            File::create(&p).unwrap();
+            p
+        })
+        .status,
+        Status::Empty
+    );
 }
 
 #[test]
@@ -232,7 +239,11 @@ fn text_limit_truncates_and_reports_it() {
     let dir = TempDir::new().unwrap();
     let path = dir.path().join("big.txt");
     fs::write(&path, "слово ".repeat(100_000)).unwrap();
-    let e = extract_file(&path, fs::metadata(&path).unwrap().len(), &Limits { max_text_bytes: 10_000, max_file_size: 1 << 30 });
+    let e = extract_file(
+        &path,
+        fs::metadata(&path).unwrap().len(),
+        &Limits { max_text_bytes: 10_000, max_file_size: 1 << 30 },
+    );
     assert!(e.truncated);
     assert!(e.text.len() <= 10_000);
     assert!(e.text.ends_with("слово") || e.text.ends_with("слов") || e.text.len() > 9_000);

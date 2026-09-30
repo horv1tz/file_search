@@ -76,17 +76,91 @@ enum Kind {
 }
 
 const OFFICE: &[&str] = &[
-    "docx", "docm", "dotx", "dotm", "doc", "dot", "xlsx", "xlsm", "xltx", "xltm", "xls", "xlt", "xlsb", "pptx",
-    "pptm", "potx", "potm", "ppsx", "ppsm", "ppt", "pps", "pot",
+    "docx", "docm", "dotx", "dotm", "doc", "dot", "xlsx", "xlsm", "xltx", "xltm", "xls", "xlt", "xlsb", "pptx", "pptm",
+    "potx", "potm", "ppsx", "ppsm", "ppt", "pps", "pot",
 ];
 const ODF: &[&str] = &["odt", "ott", "ods", "ots", "odp", "otp", "odg"];
 const HTML: &[&str] = &["html", "htm", "xhtml", "mht", "mhtml"];
 const TEXT: &[&str] = &[
-    "txt", "md", "markdown", "rst", "csv", "tsv", "log", "json", "jsonl", "xml", "yaml", "yml", "toml", "ini", "cfg",
-    "conf", "properties", "env", "css", "scss", "less", "js", "mjs", "ts", "jsx", "tsx", "py", "rs", "go", "java", "kt",
-    "kts", "c", "h", "cc", "cpp", "hpp", "cs", "php", "rb", "sh", "bash", "zsh", "bat", "cmd", "ps1", "psm1", "sql",
-    "tex", "bib", "srt", "vtt", "lua", "swift", "dart", "r", "scala", "pl", "vb", "vbs", "asm", "gradle", "cmake",
-    "fb2", "eml", "ics", "vcf", "reg", "inf", "url", "svg", "1c", "bsl", "vue", "svelte", "tf", "proto", "diff", "patch",
+    "txt",
+    "md",
+    "markdown",
+    "rst",
+    "csv",
+    "tsv",
+    "log",
+    "json",
+    "jsonl",
+    "xml",
+    "yaml",
+    "yml",
+    "toml",
+    "ini",
+    "cfg",
+    "conf",
+    "properties",
+    "env",
+    "css",
+    "scss",
+    "less",
+    "js",
+    "mjs",
+    "ts",
+    "jsx",
+    "tsx",
+    "py",
+    "rs",
+    "go",
+    "java",
+    "kt",
+    "kts",
+    "c",
+    "h",
+    "cc",
+    "cpp",
+    "hpp",
+    "cs",
+    "php",
+    "rb",
+    "sh",
+    "bash",
+    "zsh",
+    "bat",
+    "cmd",
+    "ps1",
+    "psm1",
+    "sql",
+    "tex",
+    "bib",
+    "srt",
+    "vtt",
+    "lua",
+    "swift",
+    "dart",
+    "r",
+    "scala",
+    "pl",
+    "vb",
+    "vbs",
+    "asm",
+    "gradle",
+    "cmake",
+    "fb2",
+    "eml",
+    "ics",
+    "vcf",
+    "reg",
+    "inf",
+    "url",
+    "svg",
+    "1c",
+    "bsl",
+    "vue",
+    "svelte",
+    "tf",
+    "proto",
+    "diff",
+    "patch",
 ];
 const BINARY: &[&str] = &[
     "exe", "dll", "sys", "so", "dylib", "o", "obj", "a", "lib", "pdb", "class", "jar", "bin", "dat", "iso", "img",
@@ -132,11 +206,7 @@ const OLE_MAGIC: &[u8] = &[0xD0, 0xCF, 0x11, 0xE0, 0xA1, 0xB1, 0x1A, 0xE1];
 /// Извлекает текст и метаданные из файла. Не паникует и не возвращает ошибок:
 /// любая проблема отражается в [`Extracted::status`], а имя файла индексируется всегда.
 pub fn extract_file(path: &Path, size: u64, limits: &Limits) -> Extracted {
-    let ext = path
-        .extension()
-        .and_then(|e| e.to_str())
-        .map(str::to_lowercase)
-        .unwrap_or_default();
+    let ext = path.extension().and_then(|e| e.to_str()).map(str::to_lowercase).unwrap_or_default();
     let kind = classify(&ext);
 
     if kind == Kind::Binary {
@@ -206,7 +276,8 @@ fn office(path: &Path, limits: &Limits, out: &mut Doc) -> anyhow::Result<()> {
         plain(path, limits, out, PlainMode::Rtf)
     } else {
         // Ни zip, ни OLE, ни RTF: бывает HTML или обычный текст с «офисным» расширением.
-        plain(path, limits, out, PlainMode::Sniff).map_err(|_| anyhow::anyhow!("содержимое не похоже на документ Office"))
+        plain(path, limits, out, PlainMode::Sniff)
+            .map_err(|_| anyhow::anyhow!("содержимое не похоже на документ Office"))
     }
 }
 

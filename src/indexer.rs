@@ -18,15 +18,8 @@ use crate::extract::{EXTRACTOR_VERSION, Extracted, Limits, Status, UNIT_SEP, ext
 use crate::schema::{Fields, path_key};
 
 /// Папки, которые почти никогда не нужны в поиске.
-const DEFAULT_EXCLUDED_DIRS: &[&str] = &[
-    "$recycle.bin",
-    "system volume information",
-    ".git",
-    ".svn",
-    ".hg",
-    "node_modules",
-    "__pycache__",
-];
+const DEFAULT_EXCLUDED_DIRS: &[&str] =
+    &["$recycle.bin", "system volume information", ".git", ".svn", ".hg", "node_modules", "__pycache__"];
 const DEFAULT_EXCLUDED_FILES: &[&str] = &["thumbs.db", "desktop.ini", ".ds_store"];
 
 /// Сколько текста накапливаем в памяти между коммитами.
@@ -141,11 +134,7 @@ fn build_globs(patterns: &[String]) -> Result<GlobSet> {
 }
 
 fn mtime_ms(meta: &std::fs::Metadata) -> u64 {
-    meta.modified()
-        .ok()
-        .and_then(|t| t.duration_since(UNIX_EPOCH).ok())
-        .map(|d| d.as_millis() as u64)
-        .unwrap_or(0)
+    meta.modified().ok().and_then(|t| t.duration_since(UNIX_EPOCH).ok()).map(|d| d.as_millis() as u64).unwrap_or(0)
 }
 
 fn load_existing(index: &Index, fields: &Fields, prefixes: &[String]) -> Result<HashMap<String, Existing>> {
@@ -218,13 +207,18 @@ fn build_doc(f: &Fields, c: &Candidate, ex: &Extracted) -> TantivyDocument {
     doc
 }
 
-struct Excluder {
+/// Правила исключения файлов и папок из индекса.
+pub struct Excluder {
     globs: GlobSet,
     defaults: bool,
 }
 
 impl Excluder {
-    fn excluded(&self, path: &Path, is_dir: bool) -> bool {
+    pub fn new(patterns: &[String], defaults: bool) -> Result<Excluder> {
+        Ok(Excluder { globs: build_globs(patterns)?, defaults })
+    }
+
+    pub fn excluded(&self, path: &Path, is_dir: bool) -> bool {
         let name = path.file_name().map(|n| n.to_string_lossy().to_lowercase()).unwrap_or_default();
         if self.defaults {
             if is_dir && DEFAULT_EXCLUDED_DIRS.contains(&name.as_str()) {
@@ -245,6 +239,81 @@ impl Excluder {
         let full = path.to_string_lossy().replace('\\', "/");
         self.globs.is_match(&full) || self.globs.is_match(name.as_str())
     }
+
+    /// Исключён ли путь сам или любая из его папок внутри корней. Пути вне корней считаются исключёнными.
+    pub fn excluded_in_roots(&self, path: &Path, is_dir: bool, roots: &[PathBuf]) -> bool {
+        let Some(root) = roots.iter().find(|r| path.starts_with(r)) else { return true };
+        for ancestor in path.ancestors() {
+            if ancestor == root.as_path() {
+                break;
+            }
+            if self.excluded(ancestor, ancestor != path || is_dir) {
+                return true;
+            }
+        }
+        false
+    }
+}
+
+fn candidate_from(path: PathBuf, meta: &std::fs::Metadata) -> Candidate {
+    let key = path_key(&path.to_string_lossy());
+    Candidate { path, key, size: meta.len(), mtime: mtime_ms(meta) }
+}
+
+/// Заменяет запись о файле в индексе: старая удаляется, новая добавляется.
+fn store(writer: &IndexWriter, fields: &Fields, c: &Candidate, ex: &Extracted) -> Result<()> {
+    writer.delete_term(Term::from_field_text(fields.key, &c.key));
+    writer.add_document(build_doc(fields, c, ex))?;
+    Ok(())
+}
+
+/// Индексирует один файл (для режима слежения). Возвращает результат извлечения.
+pub fn upsert_file(
+    writer: &IndexWriter,
+    fields: &Fields,
+    path: &Path,
+    meta: &std::fs::Metadata,
+    limits: &Limits,
+) -> Result<Extracted> {
+    let c = candidate_from(path.to_path_buf(), meta);
+    let ex = extract_file(&c.path, c.size, limits);
+    store(writer, fields, &c, &ex)?;
+    Ok(ex)
+}
+
+/// Удаляет из индекса файл или целую папку (всё, что лежит под этим путём).
+pub fn delete_path(writer: &IndexWriter, fields: &Fields, path: &Path) -> Result<()> {
+    let key = path_key(&path.to_string_lossy());
+    writer.delete_term(Term::from_field_text(fields.key, &key));
+    let prefix = format!("{}/", crate::query::regex_escape(key.trim_end_matches('/')));
+    let children = tantivy::query::RegexQuery::from_pattern(&format!("{prefix}.*"), fields.key)?;
+    writer.delete_query(Box::new(children))?;
+    Ok(())
+}
+
+/// Индексирует все файлы папки (например, появившейся или переименованной). Возвращает их число.
+pub fn index_tree(
+    writer: &IndexWriter,
+    fields: &Fields,
+    dir: &Path,
+    excluder: &Excluder,
+    limits: &Limits,
+) -> Result<u64> {
+    let mut count = 0;
+    let walker = WalkDir::new(dir)
+        .follow_links(false)
+        .into_iter()
+        .filter_entry(|e| e.depth() == 0 || !excluder.excluded(e.path(), e.file_type().is_dir()));
+    for entry in walker.flatten() {
+        if !entry.file_type().is_file() {
+            continue;
+        }
+        if let Ok(meta) = entry.metadata() {
+            upsert_file(writer, fields, entry.path(), &meta, limits)?;
+            count += 1;
+        }
+    }
+    Ok(count)
 }
 
 pub fn run(
@@ -258,7 +327,7 @@ pub fn run(
     let mut summary = Summary::default();
 
     let roots: Vec<PathBuf> = opts.roots.iter().map(|r| normalize_root(r)).collect::<Result<_>>()?;
-    let excluder = Excluder { globs: build_globs(&opts.excludes)?, defaults: opts.default_excludes };
+    let excluder = Excluder::new(&opts.excludes, opts.default_excludes)?;
     let prefixes: Vec<String> = roots.iter().map(|r| root_prefix(r)).collect();
 
     progress.message("Чтение текущего индекса…");
@@ -303,14 +372,14 @@ pub fn run(
             if summary.scanned % 1000 == 0 {
                 progress.scanning(summary.scanned);
             }
-            let path = entry.into_path();
-            let key = path_key(&path.to_string_lossy());
-            let (size, mtime) = (meta.len(), mtime_ms(&meta));
-            match existing.remove(&key) {
-                Some(e) if !opts.force && e.mtime == mtime && e.size == size && e.ver == EXTRACTOR_VERSION => {
+            let cand = candidate_from(entry.into_path(), &meta);
+            match existing.remove(&cand.key) {
+                Some(e)
+                    if !opts.force && e.mtime == cand.mtime && e.size == cand.size && e.ver == EXTRACTOR_VERSION =>
+                {
                     summary.unchanged += 1;
                 }
-                _ => todo.push(Candidate { path, key, size, mtime }),
+                _ => todo.push(cand),
             }
         }
     }
@@ -357,11 +426,9 @@ pub fn run(
             let ex = extract_file(&c.path, c.size, &opts.limits);
             let text_len = ex.text.len() + ex.meta.len();
             counters.record(&ex);
-            let doc = build_doc(fields, c, &ex);
             {
                 let w = writer.read().unwrap();
-                w.delete_term(Term::from_field_text(fields.key, &c.key));
-                if let Err(e) = w.add_document(doc) {
+                if let Err(e) = store(&w, fields, c, &ex) {
                     let mut f = failures.lock().unwrap();
                     f.push((c.path.clone(), format!("индекс: {e}")));
                     return;

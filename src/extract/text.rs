@@ -85,7 +85,11 @@ pub fn decode_bytes(bytes: &[u8]) -> Cow<'_, str> {
 
 pub fn looks_like_html(text: &str) -> bool {
     let head: String = text.trim_start().chars().take(512).collect::<String>().to_lowercase();
-    head.starts_with("<!doctype html") || head.starts_with("<html") || head.contains("<html") || head.contains("<body") || head.contains("<table")
+    head.starts_with("<!doctype html")
+        || head.starts_with("<html")
+        || head.contains("<html")
+        || head.contains("<body")
+        || head.contains("<table")
 }
 
 fn decode_entity(name: &str) -> Option<char> {
@@ -125,8 +129,28 @@ fn find_ci(hay: &[u8], from: usize, needle: &[u8]) -> Option<usize> {
 /// Грубое удаление разметки: теги, скрипты, стили, комментарии; сущности раскрываются.
 pub fn strip_html(s: &str) -> String {
     const BLOCK: [&str; 22] = [
-        "p", "div", "br", "li", "ul", "ol", "tr", "table", "h1", "h2", "h3", "h4", "h5", "h6", "section", "article",
-        "header", "footer", "title", "pre", "blockquote", "hr",
+        "p",
+        "div",
+        "br",
+        "li",
+        "ul",
+        "ol",
+        "tr",
+        "table",
+        "h1",
+        "h2",
+        "h3",
+        "h4",
+        "h5",
+        "h6",
+        "section",
+        "article",
+        "header",
+        "footer",
+        "title",
+        "pre",
+        "blockquote",
+        "hr",
     ];
     let b = s.as_bytes();
     let mut out = String::with_capacity(s.len() / 2);
@@ -155,12 +179,12 @@ pub fn strip_html(s: &str) -> String {
             }
             b'&' => {
                 let end = b[i + 1..].iter().take(10).position(|&c| c == b';');
-                if let Some(p) = end {
-                    if let Some(c) = decode_entity(&s[i + 1..i + 1 + p]) {
-                        out.push(c);
-                        i += p + 2;
-                        continue;
-                    }
+                if let Some(p) = end
+                    && let Some(c) = decode_entity(&s[i + 1..i + 1 + p])
+                {
+                    out.push(c);
+                    i += p + 2;
+                    continue;
                 }
                 out.push('&');
                 i += 1;
@@ -181,8 +205,12 @@ mod tests {
 
     #[test]
     fn detects_cp1251() {
-        let (bytes, _, _) = encoding_rs::WINDOWS_1251.encode("Договор аренды помещения № 5 от 12 марта, стороны подписали акт приёма-передачи");
-        assert_eq!(decode_bytes(&bytes), "Договор аренды помещения № 5 от 12 марта, стороны подписали акт приёма-передачи");
+        let (bytes, _, _) = encoding_rs::WINDOWS_1251
+            .encode("Договор аренды помещения № 5 от 12 марта, стороны подписали акт приёма-передачи");
+        assert_eq!(
+            decode_bytes(&bytes),
+            "Договор аренды помещения № 5 от 12 марта, стороны подписали акт приёма-передачи"
+        );
     }
 
     #[test]

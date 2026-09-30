@@ -110,7 +110,7 @@ pub fn parse_size(s: &str) -> Option<u64> {
         _ => (s, 1),
     };
     let v: f64 = num.trim().parse().ok()?;
-    (v >= 0.0).then(|| (v * mult as f64) as u64)
+    (v >= 0.0).then_some((v * mult as f64) as u64)
 }
 
 /// «2024-03-15», «15.03.2024», «2024-03-15 14:30» → миллисекунды с 1970 (местное время).

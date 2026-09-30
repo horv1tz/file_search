@@ -16,6 +16,7 @@ use file_search::platform::{format_size, parse_date_ms, parse_size};
 use file_search::query::Mode;
 use file_search::schema::{default_index_dir, index_exists, open_or_create_index};
 use file_search::search::{SearchOptions, Searcher, Sort};
+use file_search::watcher::{self, WatchOptions};
 use file_search::{interactive, render, web};
 
 #[derive(Parser)]
@@ -42,6 +43,8 @@ enum Command {
     /// Интерактивный поиск в терминале
     #[command(visible_alias = "i")]
     Interactive(FilterArgs),
+    /// Следить за папками и обновлять индекс при изменении файлов (работает до Ctrl+C)
+    Watch(WatchArgs),
     /// Запустить веб-интерфейс на этом компьютере
     Serve(ServeArgs),
     /// Показать состояние индекса
@@ -61,20 +64,15 @@ enum Command {
     },
 }
 
-#[derive(Args)]
-struct IndexArgs {
-    /// Папки и диски, например: D:\ или /home/user/docs
-    #[arg(required = true, value_name = "ПУТЬ")]
-    paths: Vec<PathBuf>,
+/// Параметры обхода и чтения файлов, общие для `index`, `watch` и `serve --watch`.
+#[derive(Args, Clone)]
+struct ScanArgs {
     /// Исключить файлы/папки по шаблону, например '*.tmp' или '**/backup/**' (можно несколько раз)
     #[arg(short = 'x', long = "exclude", value_name = "ШАБЛОН")]
     excludes: Vec<String>,
     /// Не пропускать служебные папки ($RECYCLE.BIN, .git, node_modules…)
     #[arg(long)]
     no_default_excludes: bool,
-    /// Переиндексировать всё, даже неизменившиеся файлы
-    #[arg(long)]
-    force: bool,
     /// Число потоков (по умолчанию — по числу ядер)
     #[arg(short = 'j', long)]
     threads: Option<usize>,
@@ -84,9 +82,47 @@ struct IndexArgs {
     /// Файлы больше этого размера индексируются только по имени, МБ
     #[arg(long, default_value_t = 512, value_name = "МБ")]
     max_file_mb: u64,
+}
+
+impl ScanArgs {
+    fn options(&self, paths: Vec<PathBuf>) -> indexer::Options {
+        let mut opts = indexer::Options::new(paths);
+        opts.excludes = self.excludes.clone();
+        opts.default_excludes = !self.no_default_excludes;
+        if let Some(t) = self.threads {
+            opts.threads = t.max(1);
+        }
+        opts.limits =
+            Limits { max_text_bytes: self.max_text_mb.max(1) << 20, max_file_size: self.max_file_mb.max(1) << 20 };
+        opts
+    }
+}
+
+#[derive(Args)]
+struct IndexArgs {
+    /// Папки и диски, например: D:\ или /home/user/docs
+    #[arg(required = true, value_name = "ПУТЬ")]
+    paths: Vec<PathBuf>,
+    #[command(flatten)]
+    scan: ScanArgs,
+    /// Переиндексировать всё, даже неизменившиеся файлы
+    #[arg(long)]
+    force: bool,
     /// Показать полный список файлов, которые не удалось прочитать
     #[arg(long)]
     errors: bool,
+}
+
+#[derive(Args)]
+struct WatchArgs {
+    /// Папки и диски, за которыми следить, например: D:\
+    #[arg(required = true, value_name = "ПУТЬ")]
+    paths: Vec<PathBuf>,
+    #[command(flatten)]
+    scan: ScanArgs,
+    /// Как часто делать полную проверку на случай пропущенных событий, минут
+    #[arg(long, default_value_t = 30, value_name = "МИНУТ")]
+    rescan_minutes: u64,
 }
 
 #[derive(Clone, Copy, ValueEnum)]
@@ -166,6 +202,11 @@ struct ServeArgs {
     /// Открыть страницу в браузере
     #[arg(long)]
     open: bool,
+    /// Заодно индексировать и отслеживать эти папки (можно несколько раз)
+    #[arg(short, long = "watch", value_name = "ПУТЬ")]
+    watch: Vec<PathBuf>,
+    #[command(flatten)]
+    scan: ScanArgs,
 }
 
 fn main() -> ExitCode {
@@ -188,7 +229,8 @@ fn run() -> Result<()> {
             let searcher = Searcher::open(&dir, false)?;
             interactive::run(&searcher, search_options(&f, String::new())?)
         }
-        Command::Serve(a) => web::serve(&dir, a.port, a.open),
+        Command::Watch(a) => cmd_watch(&dir, a),
+        Command::Serve(a) => cmd_serve(&dir, a),
         Command::Stats => cmd_stats(&dir),
         Command::Reset { yes } => cmd_reset(&dir, yes),
         Command::Extract { file, full } => cmd_extract(&file, full),
@@ -217,9 +259,11 @@ impl Progress for Bar {
 
     fn indexing_started(&self, total: u64) {
         self.pb.set_style(
-            ProgressStyle::with_template("{bar:40.cyan/blue} {pos}/{len} ({percent}%) · {per_sec} · осталось {eta} · {msg}")
-                .unwrap()
-                .progress_chars("━╸─"),
+            ProgressStyle::with_template(
+                "{bar:40.cyan/blue} {pos}/{len} ({percent}%) · {per_sec} · осталось {eta} · {msg}",
+            )
+            .unwrap()
+            .progress_chars("━╸─"),
         );
         self.pb.set_length(total);
         self.pb.set_position(0);
@@ -236,30 +280,73 @@ impl Progress for Bar {
     }
 }
 
+/// Первое Ctrl+C просит работу корректно завершиться, второе — выходит сразу.
+fn install_ctrlc() -> Result<Arc<AtomicBool>> {
+    let cancel = Arc::new(AtomicBool::new(false));
+    let flag = cancel.clone();
+    ctrlc::set_handler(move || {
+        if flag.swap(true, Ordering::SeqCst) {
+            std::process::exit(130);
+        }
+        eprintln!("\nОстанавливаюсь и сохраняю сделанное… (повторное Ctrl+C — выход сразу)");
+    })
+    .context("не удалось установить обработчик Ctrl+C")?;
+    Ok(cancel)
+}
+
+fn cmd_watch(dir: &Path, a: WatchArgs) -> Result<()> {
+    extract::install_quiet_panic_hook();
+    let (index, fields) = open_or_create_index(dir)?;
+    let cancel = install_ctrlc()?;
+    let mut opts = WatchOptions::new(a.scan.options(a.paths));
+    opts.rescan_every = Duration::from_secs(a.rescan_minutes.max(1) * 60);
+    println!("Индекс: {}\nСлежение до Ctrl+C.", dir.display());
+    watcher::watch(&index, &fields, &opts, &watcher::log_line, &cancel)?;
+    println!("Слежение остановлено.");
+    Ok(())
+}
+
+fn cmd_serve(dir: &Path, a: ServeArgs) -> Result<()> {
+    if !a.watch.is_empty() {
+        extract::install_quiet_panic_hook();
+        let (index, fields) = open_or_create_index(dir)?;
+        let cancel = Arc::new(AtomicBool::new(false));
+        let done = Arc::new(AtomicBool::new(false));
+        let opts = WatchOptions::new(a.scan.options(a.watch.clone()));
+        {
+            let (cancel, done) = (cancel.clone(), done.clone());
+            std::thread::spawn(move || {
+                if let Err(e) = watcher::watch(&index, &fields, &opts, &watcher::log_line, &cancel) {
+                    eprintln!("{} {e:#}", style("Слежение остановлено из-за ошибки:").red());
+                }
+                done.store(true, Ordering::SeqCst);
+            });
+        }
+        // Сервер блокирует основной поток, поэтому завершаем процесс из обработчика Ctrl+C,
+        // дав слежению закончить текущую пачку и сохранить индекс.
+        ctrlc::set_handler(move || {
+            cancel.store(true, Ordering::SeqCst);
+            for _ in 0..100 {
+                if done.load(Ordering::SeqCst) {
+                    break;
+                }
+                std::thread::sleep(Duration::from_millis(100));
+            }
+            std::process::exit(0);
+        })
+        .context("не удалось установить обработчик Ctrl+C")?;
+    }
+    web::serve(dir, a.port, a.open)
+}
+
 fn cmd_index(dir: &Path, a: IndexArgs) -> Result<()> {
     extract::install_quiet_panic_hook();
     let (index, fields) = open_or_create_index(dir)?;
 
-    let mut opts = indexer::Options::new(a.paths);
-    opts.excludes = a.excludes;
-    opts.default_excludes = !a.no_default_excludes;
+    let mut opts = a.scan.options(a.paths);
     opts.force = a.force;
-    if let Some(t) = a.threads {
-        opts.threads = t.max(1);
-    }
-    opts.limits = Limits { max_text_bytes: a.max_text_mb.max(1) << 20, max_file_size: a.max_file_mb.max(1) << 20 };
 
-    let cancel = Arc::new(AtomicBool::new(false));
-    {
-        let cancel = cancel.clone();
-        ctrlc::set_handler(move || {
-            if cancel.swap(true, Ordering::SeqCst) {
-                std::process::exit(130);
-            }
-            eprintln!("\nОстанавливаюсь и сохраняю сделанное… (повторное Ctrl+C — выход сразу)");
-        })
-        .context("не удалось установить обработчик Ctrl+C")?;
-    }
+    let cancel = install_ctrlc()?;
 
     println!("Индекс: {}", dir.display());
     let bar = Bar::new();
@@ -289,7 +376,11 @@ fn print_summary(s: &Summary, all_errors: bool) {
         println!("  {} {}", style("Не удалось прочитать:     ").yellow(), s.failed_total);
     }
     if s.walk_errors_total > 0 {
-        println!("  {} {} (нет доступа к папкам/файлам)", style("Ошибок обхода:            ").yellow(), s.walk_errors_total);
+        println!(
+            "  {} {} (нет доступа к папкам/файлам)",
+            style("Ошибок обхода:            ").yellow(),
+            s.walk_errors_total
+        );
     }
     let shown = if all_errors { s.failed.len() } else { 10.min(s.failed.len()) };
     if shown > 0 {
@@ -318,11 +409,22 @@ fn search_options(f: &FilterArgs, query: String) -> Result<SearchOptions> {
         v.as_deref().map(|s| parse_size(s).with_context(|| format!("не понимаю размер для {what}: {s}"))).transpose()
     };
     let date = |v: &Option<String>, what: &str, end: bool| -> Result<Option<u64>> {
-        v.as_deref().map(|s| parse_date_ms(s, end).with_context(|| format!("не понимаю дату для {what}: {s} (нужно ГГГГ-ММ-ДД или ДД.ММ.ГГГГ)"))).transpose()
+        v.as_deref()
+            .map(|s| {
+                parse_date_ms(s, end)
+                    .with_context(|| format!("не понимаю дату для {what}: {s} (нужно ГГГГ-ММ-ДД или ДД.ММ.ГГГГ)"))
+            })
+            .transpose()
     };
     Ok(SearchOptions {
         query,
-        mode: if f.name { Mode::Name } else if f.content { Mode::Content } else { Mode::All },
+        mode: if f.name {
+            Mode::Name
+        } else if f.content {
+            Mode::Content
+        } else {
+            Mode::All
+        },
         exts: f.ext.clone(),
         dirs: f.dirs.clone(),
         min_size: size(&f.min_size, "--min-size")?,
@@ -347,8 +449,12 @@ fn cmd_search(dir: &Path, a: SearchArgs) -> Result<()> {
     };
     opts.snippets = !a.no_snippets && !a.paths;
 
-    let no_filters = opts.exts.is_empty() && opts.dirs.is_empty() && opts.min_size.is_none() && opts.max_size.is_none()
-        && opts.modified_after.is_none() && opts.modified_before.is_none();
+    let no_filters = opts.exts.is_empty()
+        && opts.dirs.is_empty()
+        && opts.min_size.is_none()
+        && opts.max_size.is_none()
+        && opts.modified_after.is_none()
+        && opts.modified_before.is_none();
     if opts.query.trim().is_empty() && no_filters {
         bail!("пустой запрос. Пример: fsearch search договор аренды");
     }
@@ -433,7 +539,11 @@ fn cmd_extract(file: &Path, full: bool) -> Result<()> {
     }
     let text = e.text.replace(UNIT_SEP, "\n──────── \n");
     let shown: String = if full { text.clone() } else { text.chars().take(3000).collect() };
-    println!("Текст ({} симв.{}):\n{shown}", e.text.chars().count(), if e.truncated { ", обрезан по лимиту" } else { "" });
+    println!(
+        "Текст ({} симв.{}):\n{shown}",
+        e.text.chars().count(),
+        if e.truncated { ", обрезан по лимиту" } else { "" }
+    );
     if !full && text.chars().count() > 3000 {
         println!("… (--full — показать всё)");
     }

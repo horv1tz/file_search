@@ -139,9 +139,7 @@ pub fn parse(input: &str) -> Parsed {
         if let Some(list) = tok.strip_prefix("ext:").or_else(|| tok.strip_prefix("тип:")) {
             if !negate {
                 parsed.exts.extend(
-                    list.split(',')
-                        .map(|e| e.trim().trim_start_matches('.').to_lowercase())
-                        .filter(|e| !e.is_empty()),
+                    list.split(',').map(|e| e.trim().trim_start_matches('.').to_lowercase()).filter(|e| !e.is_empty()),
                 );
             }
             continue;
@@ -227,7 +225,14 @@ impl Compiler<'_> {
     /// `alt` — исходная (нестеммированная) форма одиночного слова: стеммер Snowball иногда
     /// «съедает» окончание у слов в начальной форме («гиппопотам» → «гиппопот»), и тогда
     /// оно не совпало бы со своими же формами («гиппопотама» → «гиппопотам»).
-    fn tokens_query(&self, field: Field, tokens: &[String], alt: Option<&str>, positions: bool, boost: f32) -> Option<BoxQuery> {
+    fn tokens_query(
+        &self,
+        field: Field,
+        tokens: &[String],
+        alt: Option<&str>,
+        positions: bool,
+        boost: f32,
+    ) -> Option<BoxQuery> {
         let terms: Vec<Term> = tokens.iter().map(|t| Term::from_field_text(field, t)).collect();
         let q: BoxQuery = match terms.len() {
             0 => return None,
@@ -282,7 +287,10 @@ impl Compiler<'_> {
                 }
                 // Подстрока в имени: «отч» найдёт «квартальный_отчёт.xlsx».
                 let lc = w.to_lowercase();
-                if matches!(scope, Scope::Any | Scope::Name) && matches!(clause.text, Text::Word(_)) && lc.chars().count() >= 2 {
+                if matches!(scope, Scope::Any | Scope::Name)
+                    && matches!(clause.text, Text::Word(_))
+                    && lc.chars().count() >= 2
+                {
                     should.extend(self.regex_query(f.name_lc, &format!(".*{}.*", regex_escape(&lc)), 3.0));
                 }
             }
@@ -387,12 +395,12 @@ impl Compiler<'_> {
             }
         }
 
-        for (field, lo, hi) in [
-            (f.size, filters.min_size, filters.max_size),
-            (f.mtime, filters.modified_after, filters.modified_before),
-        ] {
+        for (field, lo, hi) in
+            [(f.size, filters.min_size, filters.max_size), (f.mtime, filters.modified_after, filters.modified_before)]
+        {
             if lo.is_some() || hi.is_some() {
-                let bound = |v: Option<u64>| v.map_or(Bound::Unbounded, |v| Bound::Included(Term::from_field_u64(field, v)));
+                let bound =
+                    |v: Option<u64>| v.map_or(Bound::Unbounded, |v| Bound::Included(Term::from_field_u64(field, v)));
                 clauses.push((Occur::Must, Box::new(RangeQuery::new(bound(lo), bound(hi)))));
             }
         }

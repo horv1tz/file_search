@@ -21,7 +21,8 @@ fn word_documents_in_every_format() {
     for name in ["contract.docx", "contract.doc", "contract.odt", "contract.rtf", "contract.pdf"] {
         let e = extract(name);
         assert_eq!(e.status, Status::Ok, "{name}");
-        for needle in ["Договор аренды № 42", "Кракозябровая", "150000 рублей", "Депозит", "300000", "Zeppelin"] {
+        for needle in ["Договор аренды № 42", "Кракозябровая", "150000 рублей", "Депозит", "300000", "Zeppelin"]
+        {
             assert!(e.text.contains(needle), "{name}: нет «{needle}»");
         }
     }
@@ -57,7 +58,8 @@ fn excel_workbooks_in_every_format() {
         let e = extract(name);
         assert_eq!(e.status, Status::Ok, "{name}");
         assert_eq!(e.units, ["Лист «Продажи»", "Лист «Sheet2»"], "{name}");
-        for needle in ["Тюльпаны голландские", "INV-774411", "45678.5", "Quarterly revenue", "7654321"] {
+        for needle in ["Тюльпаны голландские", "INV-774411", "45678.5", "Quarterly revenue", "7654321"]
+        {
             assert!(e.text.contains(needle), "{name}: нет «{needle}»");
         }
         assert_eq!(unit_of(&e, "Тюльпаны").as_deref(), Some("Лист «Продажи»"), "{name}");
@@ -94,7 +96,8 @@ fn powerpoint_in_every_format() {
     for name in ["strategy.pptx", "strategy.ppt", "strategy.odp", "strategy.pdf"] {
         let e = extract(name);
         assert_eq!(e.status, Status::Ok, "{name}");
-        for needle in ["Стратегия развития 2025", "Ключевые метрики", "Ландыш", "Roadmap and milestones", "Хабибуллин"] {
+        for needle in ["Стратегия развития 2025", "Ключевые метрики", "Ландыш", "Roadmap and milestones", "Хабибуллин"]
+        {
             assert!(e.text.contains(needle), "{name}: нет «{needle}»");
         }
     }

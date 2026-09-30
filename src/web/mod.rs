@@ -23,8 +23,36 @@ const INDEX_HTML: &str = include_str!("index.html");
 
 /// Такие файлы из браузерного интерфейса можно только показать в папке, но не запустить.
 const NEVER_LAUNCH: &[&str] = &[
-    "exe", "bat", "cmd", "com", "msi", "msp", "ps1", "psm1", "vbs", "vbe", "js", "jse", "wsf", "wsh", "scr", "lnk",
-    "reg", "jar", "sh", "app", "dll", "cpl", "hta", "pif", "appx", "msix", "url", "inf", "gadget", "appref-ms",
+    "exe",
+    "bat",
+    "cmd",
+    "com",
+    "msi",
+    "msp",
+    "ps1",
+    "psm1",
+    "vbs",
+    "vbe",
+    "js",
+    "jse",
+    "wsf",
+    "wsh",
+    "scr",
+    "lnk",
+    "reg",
+    "jar",
+    "sh",
+    "app",
+    "dll",
+    "cpl",
+    "hta",
+    "pif",
+    "appx",
+    "msix",
+    "url",
+    "inf",
+    "gadget",
+    "appref-ms",
 ];
 
 struct State {

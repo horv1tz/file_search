@@ -7,4 +7,5 @@ pub mod query;
 pub mod render;
 pub mod schema;
 pub mod search;
+pub mod watcher;
 pub mod web;

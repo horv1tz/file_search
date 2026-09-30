@@ -126,7 +126,11 @@ fn file_names_are_searched_by_word_and_by_substring() {
 fn name_matches_outrank_content_matches() {
     let env = Env::new();
     fs::write(env.root().join("budget.txt"), "нечто совсем другое").unwrap();
-    fs::write(env.root().join("notes.txt"), "в этой заметке упомянут budget один раз среди прочего текста про другое дело").unwrap();
+    fs::write(
+        env.root().join("notes.txt"),
+        "в этой заметке упомянут budget один раз среди прочего текста про другое дело",
+    )
+    .unwrap();
     env.index();
     let r = env.search("budget");
     assert_eq!(r.hits[0].name, "budget.txt");
@@ -143,9 +147,15 @@ fn filters_by_type_folder_size_and_date() {
     assert_eq!(only_docx.hits.iter().map(|h| h.name.as_str()).collect::<Vec<_>>(), ["contract.docx"]);
     assert_eq!(env.search("ext:xls,xlsx Ромашка").total, 2);
 
-    let in_reports = env.search_with(SearchOptions { dirs: vec![env.root().join("Отчёты").to_string_lossy().into_owned()], ..base.clone() });
+    let in_reports = env.search_with(SearchOptions {
+        dirs: vec![env.root().join("Отчёты").to_string_lossy().into_owned()],
+        ..base.clone()
+    });
     assert_eq!(in_reports.total, 2);
-    let with_slash = env.search_with(SearchOptions { dirs: vec![format!("{}/", env.root().join("Отчёты").display())], ..base.clone() });
+    let with_slash = env
+        .search_with(SearchOptions {
+            dirs: vec![format!("{}/", env.root().join("Отчёты").display())], ..base.clone()
+        });
     assert_eq!(with_slash.total, 2);
 
     let big = env.search_with(SearchOptions { min_size: Some(30_000), ..base.clone() });
@@ -163,7 +173,8 @@ fn filters_by_type_folder_size_and_date() {
 fn filters_alone_list_files_and_sorting_works() {
     let env = Env::new();
     env.index();
-    let r = env.search_with(SearchOptions { exts: vec!["docx".into(), "xlsx".into(), "pptx".into()], ..Default::default() });
+    let r = env
+        .search_with(SearchOptions { exts: vec!["docx".into(), "xlsx".into(), "pptx".into()], ..Default::default() });
     assert_eq!(r.total, 3);
     let largest = env.search_with(SearchOptions { sort: Sort::Largest, limit: 100, ..Default::default() });
     let sizes: Vec<u64> = largest.hits.iter().map(|h| h.size).collect();
@@ -177,7 +188,12 @@ fn filters_alone_list_files_and_sorting_works() {
 fn pagination_covers_all_results_without_overlap() {
     let env = Env::new();
     env.index();
-    let all: Vec<String> = env.search_with(SearchOptions { exts: vec![], limit: 100, ..Default::default() }).hits.into_iter().map(|h| h.path).collect();
+    let all: Vec<String> = env
+        .search_with(SearchOptions { exts: vec![], limit: 100, ..Default::default() })
+        .hits
+        .into_iter()
+        .map(|h| h.path)
+        .collect();
     assert_eq!(all.len(), 7);
     let mut paged = Vec::new();
     for offset in (0..7).step_by(3) {
@@ -195,7 +211,9 @@ fn pagination_covers_all_results_without_overlap() {
 fn snippets_are_highlighted_and_know_their_sheet_or_slide() {
     let env = Env::new();
     env.index();
-    let hit = |q: &str, name: &str| env.search(q).hits.into_iter().find(|h| h.name == name).unwrap_or_else(|| panic!("{name} не найден по {q}"));
+    let hit = |q: &str, name: &str| {
+        env.search(q).hits.into_iter().find(|h| h.name == name).unwrap_or_else(|| panic!("{name} не найден по {q}"))
+    };
 
     let h = hit("Quarterly", "sales.xlsx");
     assert_eq!(h.location.as_deref(), Some("Лист «Sheet2»"));

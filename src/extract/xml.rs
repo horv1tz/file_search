@@ -103,12 +103,7 @@ pub fn resolve_ref(r: &quick_xml::events::BytesRef<'_>, out: &mut String) {
     }
 }
 
-pub fn extract_xml<R: BufRead, H: Hooks>(
-    src: R,
-    rules: &Rules,
-    hooks: &mut H,
-    out: &mut Doc,
-) -> Result<()> {
+pub fn extract_xml<R: BufRead, H: Hooks>(src: R, rules: &Rules, hooks: &mut H, out: &mut Doc) -> Result<()> {
     let mut reader = new_reader(src);
     let mut buf = Vec::new();
     let mut scratch = String::new();
@@ -212,16 +207,8 @@ fn block_end(n: &str, rules: &Rules, inline: bool, out: &mut Doc) {
 
 /// Быстрое извлечение всего текста из небольшой XML-части (для метаданных).
 pub fn collect_texts<R: BufRead>(src: R, names: &'static [&'static str]) -> Vec<String> {
-    let rules = Rules {
-        text: names,
-        block_end: names,
-        ..Rules::EMPTY
-    };
+    let rules = Rules { text: names, block_end: names, ..Rules::EMPTY };
     let mut d = Doc::new(64 * 1024);
     let _ = extract_xml(src, &rules, &mut NoHooks, &mut d);
-    d.text
-        .lines()
-        .map(|l| l.trim().to_string())
-        .filter(|l| !l.is_empty())
-        .collect()
+    d.text.lines().map(|l| l.trim().to_string()).filter(|l| !l.is_empty()).collect()
 }

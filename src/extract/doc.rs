@@ -47,13 +47,7 @@ pub struct Extracted {
 
 impl Extracted {
     pub fn without_content(status: Status) -> Self {
-        Extracted {
-            text: String::new(),
-            units: Vec::new(),
-            meta: String::new(),
-            status,
-            truncated: false,
-        }
+        Extracted { text: String::new(), units: Vec::new(), meta: String::new(), status, truncated: false }
     }
 }
 
@@ -141,11 +135,7 @@ impl Doc {
     }
 
     fn last_byte(&self) -> Option<u8> {
-        if self.at_unit_start() {
-            None
-        } else {
-            self.text.as_bytes().last().copied()
-        }
+        if self.at_unit_start() { None } else { self.text.as_bytes().last().copied() }
     }
 
     /// Перевод строки без пустых строк подряд; хвостовые пробелы/табы отбрасываются.
@@ -189,18 +179,8 @@ impl Doc {
         let trimmed = self.text.trim_end().len();
         self.text.truncate(trimmed);
         let has_text = self.text.chars().any(|c| !c.is_whitespace());
-        let status = if has_text || !self.meta.is_empty() {
-            Status::Ok
-        } else {
-            Status::Empty
-        };
-        Extracted {
-            text: self.text,
-            units: self.units,
-            meta: self.meta,
-            status,
-            truncated: self.truncated,
-        }
+        let status = if has_text || !self.meta.is_empty() { Status::Ok } else { Status::Empty };
+        Extracted { text: self.text, units: self.units, meta: self.meta, status, truncated: self.truncated }
     }
 }
 

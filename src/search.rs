@@ -118,7 +118,7 @@ pub struct Searcher {
     reader: IndexReader,
 }
 
-fn str_of<'a>(doc: &'a TantivyDocument, field: tantivy::schema::Field) -> &'a str {
+fn str_of(doc: &TantivyDocument, field: tantivy::schema::Field) -> &str {
     doc.get_first(field).and_then(|v| v.as_str()).unwrap_or("")
 }
 
@@ -142,7 +142,9 @@ impl Searcher {
         let tokenizers = self.index.tokenizers();
         (
             tokenizers.get(crate::analyzer::TOKENIZER_NAME).expect("токенайзер зарегистрирован при открытии индекса"),
-            tokenizers.get(crate::analyzer::RAW_TOKENIZER_NAME).expect("токенайзер зарегистрирован при открытии индекса"),
+            tokenizers
+                .get(crate::analyzer::RAW_TOKENIZER_NAME)
+                .expect("токенайзер зарегистрирован при открытии индекса"),
         )
     }
 
@@ -159,8 +161,13 @@ impl Searcher {
             modified_before: opts.modified_before,
         };
         let (mut analyzer, mut raw_analyzer) = self.analyzers();
-        let q = Compiler { fields: &self.fields, analyzer: &mut analyzer, raw_analyzer: &mut raw_analyzer, mode: opts.mode }
-            .compile(&parsed, &filters)?;
+        let q = Compiler {
+            fields: &self.fields,
+            analyzer: &mut analyzer,
+            raw_analyzer: &mut raw_analyzer,
+            mode: opts.mode,
+        }
+        .compile(&parsed, &filters)?;
 
         let limit = opts.limit.clamp(1, 1000);
         let sort = if opts.sort == Sort::Relevance && !parsed.has_positive() { Sort::Newest } else { opts.sort };
@@ -174,20 +181,25 @@ impl Searcher {
                     Sort::Largest => ("size", Order::Desc),
                     _ => ("size", Order::Asc),
                 };
-                let (docs, total) = searcher.search(&q, &(collector.order_by_fast_field::<u64>(field, order), Count))?;
+                let (docs, total) =
+                    searcher.search(&q, &(collector.order_by_fast_field::<u64>(field, order), Count))?;
                 (docs.into_iter().map(|(_, a)| (0.0, a)).collect(), total)
             }
         };
 
-        let highlighter =
-            if opts.snippets { self.highlighter(&searcher, &parsed, &mut analyzer, &mut raw_analyzer, opts.mode) } else { None };
+        let highlighter = if opts.snippets {
+            self.highlighter(&searcher, &parsed, &mut analyzer, &mut raw_analyzer, opts.mode)
+        } else {
+            None
+        };
 
         let mut hits = Vec::with_capacity(addresses.len());
         for (score, addr) in addresses {
             let doc: TantivyDocument = searcher.doc(addr)?;
             let f = &self.fields;
             let path = str_of(&doc, f.path).to_string();
-            let name = Path::new(&path).file_name().map(|n| n.to_string_lossy().into_owned()).unwrap_or_else(|| path.clone());
+            let name =
+                Path::new(&path).file_name().map(|n| n.to_string_lossy().into_owned()).unwrap_or_else(|| path.clone());
             let (snippet, location) = match &highlighter {
                 Some(g) => snippet_for(g, str_of(&doc, f.content), str_of(&doc, f.units)),
                 None => (None, None),
@@ -242,7 +254,8 @@ impl Searcher {
                 (Occur::Should, Box::new(q) as Box<dyn Query>)
             })
             .collect();
-        let mut generator = SnippetGenerator::create(searcher, &BooleanQuery::new(clauses), self.fields.content).ok()?;
+        let mut generator =
+            SnippetGenerator::create(searcher, &BooleanQuery::new(clauses), self.fields.content).ok()?;
         generator.set_max_num_chars(240);
         Some(generator)
     }

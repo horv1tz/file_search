@@ -13,9 +13,9 @@ use quick_xml::events::Event;
 use zip::ZipArchive;
 use zip::result::ZipError;
 
+use super::Encrypted;
 use super::doc::Doc;
 use super::xml::{self, NoHooks, Rules, attr, extract_xml, new_reader, rel_id_attr, resolve_ref};
-use super::Encrypted;
 
 /// Верхняя граница на распакованный размер одной части (защита от zip-бомб).
 const PART_CAP: u64 = 4 << 30;
@@ -42,16 +42,14 @@ impl Pkg {
     /// Имена частей, подходящие под предикат, в стабильном порядке.
     pub fn names_where(&self, pred: impl Fn(&str) -> bool) -> Vec<String> {
         let mut v: Vec<String> = self.names.iter().filter(|n| pred(n)).cloned().collect();
-        v.sort_by(|a, b| natural_key(a).cmp(&natural_key(b)));
+        v.sort_by_key(|a| natural_key(a));
         v
     }
 
     pub fn part(&mut self, name: &str) -> Result<PartReader<'_>> {
         match self.zip.by_name(name) {
             Ok(f) => Ok(BufReader::with_capacity(64 * 1024, f.take(PART_CAP))),
-            Err(ZipError::UnsupportedArchive(m)) if m.to_lowercase().contains("password") => {
-                Err(Encrypted.into())
-            }
+            Err(ZipError::UnsupportedArchive(m)) if m.to_lowercase().contains("password") => Err(Encrypted.into()),
             Err(e) => bail!("часть {name}: {e}"),
         }
     }
@@ -64,7 +62,8 @@ impl Pkg {
 /// Ключ для «естественной» сортировки: slide2 < slide10.
 fn natural_key(s: &str) -> (String, u64) {
     let stem = s.trim_end_matches(".xml");
-    let digits: String = stem.chars().rev().take_while(|c| c.is_ascii_digit()).collect::<Vec<_>>().into_iter().rev().collect();
+    let digits: String =
+        stem.chars().rev().take_while(|c| c.is_ascii_digit()).collect::<Vec<_>>().into_iter().rev().collect();
     let prefix = &stem[..stem.len() - digits.len()];
     (prefix.to_string(), digits.parse().unwrap_or(0))
 }
@@ -232,12 +231,7 @@ const PPTX_RULES: Rules = Rules {
     ..Rules::EMPTY
 };
 
-const PPTX_COMMENT_RULES: Rules = Rules {
-    text: &["t", "text"],
-    block_end: &["p", "cm"],
-    br: &["br"],
-    ..Rules::EMPTY
-};
+const PPTX_COMMENT_RULES: Rules = Rules { text: &["t", "text"], block_end: &["p", "cm"], br: &["br"], ..Rules::EMPTY };
 
 fn pptx(pkg: &mut Pkg, main: &str, out: &mut Doc) -> Result<()> {
     let rels = read_rels(pkg, main);
@@ -334,10 +328,10 @@ fn read_styles<R: BufRead>(src: R) -> Styles {
         match ev {
             Event::Start(e) | Event::Empty(e) => match e.local_name().as_ref() {
                 "numFmt" => {
-                    if let (Some(id), Some(code)) = (attr(&e, "numFmtId"), attr(&e, "formatCode")) {
-                        if let Ok(id) = id.parse() {
-                            custom.insert(id, code);
-                        }
+                    if let (Some(id), Some(code)) = (attr(&e, "numFmtId"), attr(&e, "formatCode"))
+                        && let Ok(id) = id.parse()
+                    {
+                        custom.insert(id, code);
                     }
                 }
                 "cellXfs" => in_cell_xfs = true,
@@ -352,9 +346,7 @@ fn read_styles<R: BufRead>(src: R) -> Styles {
         }
         buf.clear();
     }
-    Styles {
-        xf_is_date: xf_ids.iter().map(|id| is_date_format(*id, custom.get(id).map(String::as_str))).collect(),
-    }
+    Styles { xf_is_date: xf_ids.iter().map(|id| is_date_format(*id, custom.get(id).map(String::as_str))).collect() }
 }
 
 fn read_shared_strings<R: BufRead>(src: R, limit: usize) -> Vec<String> {
@@ -444,11 +436,7 @@ pub(super) fn excel_serial_to_string(serial: f64, date1904: bool) -> Option<Stri
     if days < 1.0 && !date1904 {
         return Some(format!("{hh:02}:{mm:02}"));
     }
-    let epoch = if date1904 {
-        NaiveDate::from_ymd_opt(1904, 1, 1)?
-    } else {
-        NaiveDate::from_ymd_opt(1899, 12, 30)?
-    };
+    let epoch = if date1904 { NaiveDate::from_ymd_opt(1904, 1, 1)? } else { NaiveDate::from_ymd_opt(1899, 12, 30)? };
     let date = epoch.checked_add_signed(Duration::days(days as i64))?;
     if !(1900..=2200).contains(&date.year()) {
         return None;
@@ -468,10 +456,8 @@ fn format_number(raw: &str, is_date: bool, date1904: bool) -> Option<String> {
         return None;
     }
     let parsed: Option<f64> = raw.parse().ok();
-    if is_date {
-        if let Some(s) = parsed.and_then(|v| excel_serial_to_string(v, date1904)) {
-            return Some(s);
-        }
+    if is_date && let Some(s) = parsed.and_then(|v| excel_serial_to_string(v, date1904)) {
+        return Some(s);
     }
     match parsed {
         Some(v) if v.fract() == 0.0 && v.abs() < 1e15 => Some(format!("{}", v as i64)),
@@ -479,13 +465,7 @@ fn format_number(raw: &str, is_date: bool, date1904: bool) -> Option<String> {
     }
 }
 
-fn read_sheet<R: BufRead>(
-    src: R,
-    shared: &[String],
-    styles: &Styles,
-    date1904: bool,
-    out: &mut Doc,
-) -> Result<()> {
+fn read_sheet<R: BufRead>(src: R, shared: &[String], styles: &Styles, date1904: bool, out: &mut Doc) -> Result<()> {
     let mut reader = new_reader(src);
     let mut buf = Vec::new();
     let mut ty = CellType::Number;
@@ -553,26 +533,12 @@ fn read_sheet<R: BufRead>(
     Ok(())
 }
 
-const COMMENT_RULES: Rules = Rules {
-    text: &["t"],
-    block_end: &["comment"],
-    skip: &["rPh"],
-    ..Rules::EMPTY
-};
+const COMMENT_RULES: Rules = Rules { text: &["t"], block_end: &["comment"], skip: &["rPh"], ..Rules::EMPTY };
 
-const THREADED_RULES: Rules = Rules {
-    text: &["text"],
-    block_end: &["threadedComment"],
-    ..Rules::EMPTY
-};
+const THREADED_RULES: Rules = Rules { text: &["text"], block_end: &["threadedComment"], ..Rules::EMPTY };
 
-const DRAWING_RULES: Rules = Rules {
-    text: &["t"],
-    block_end: &["p"],
-    br: &["br"],
-    skip: &["Fallback"],
-    ..Rules::EMPTY
-};
+const DRAWING_RULES: Rules =
+    Rules { text: &["t"], block_end: &["p"], br: &["br"], skip: &["Fallback"], ..Rules::EMPTY };
 
 fn xlsx(pkg: &mut Pkg, main: &str, out: &mut Doc) -> Result<()> {
     let wb_rels = read_rels(pkg, main);
@@ -603,10 +569,7 @@ fn xlsx(pkg: &mut Pkg, main: &str, out: &mut Doc) -> Result<()> {
         .sheets
         .iter()
         .filter_map(|(name, rid)| {
-            by_id
-                .get(rid.as_str())
-                .filter(|r| rel_type_is(r, "worksheet"))
-                .map(|r| (name.clone(), r.target.clone()))
+            by_id.get(rid.as_str()).filter(|r| rel_type_is(r, "worksheet")).map(|r| (name.clone(), r.target.clone()))
         })
         .collect();
     if sheets.is_empty() {
@@ -654,7 +617,10 @@ mod tests {
     #[test]
     fn resolves_relative_targets() {
         assert_eq!(resolve("xl/workbook.xml", "worksheets/sheet1.xml"), "xl/worksheets/sheet1.xml");
-        assert_eq!(resolve("ppt/slides/slide1.xml", "../notesSlides/notesSlide1.xml"), "ppt/notesSlides/notesSlide1.xml");
+        assert_eq!(
+            resolve("ppt/slides/slide1.xml", "../notesSlides/notesSlide1.xml"),
+            "ppt/notesSlides/notesSlide1.xml"
+        );
         assert_eq!(resolve("", "/word/document.xml"), "word/document.xml");
         assert_eq!(resolve("", "word/document.xml"), "word/document.xml");
     }
@@ -662,7 +628,7 @@ mod tests {
     #[test]
     fn natural_order() {
         let mut v = vec!["ppt/slides/slide10.xml", "ppt/slides/slide2.xml", "ppt/slides/slide1.xml"];
-        v.sort_by(|a, b| natural_key(a).cmp(&natural_key(b)));
+        v.sort_by_key(|a| natural_key(a));
         assert_eq!(v, ["ppt/slides/slide1.xml", "ppt/slides/slide2.xml", "ppt/slides/slide10.xml"]);
     }
 

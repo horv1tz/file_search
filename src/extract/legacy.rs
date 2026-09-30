@@ -115,11 +115,7 @@ fn parse_fib(wd: &[u8]) -> Option<Fib> {
     if cb_rg_fc_lcb <= 33 {
         return None;
     }
-    Some(Fib {
-        fc_clx: u32le(wd, blob + 33 * 8)? as usize,
-        lcb_clx: u32le(wd, blob + 33 * 8 + 4)? as usize,
-        ccp_text,
-    })
+    Some(Fib { fc_clx: u32le(wd, blob + 33 * 8)? as usize, lcb_clx: u32le(wd, blob + 33 * 8 + 4)? as usize, ccp_text })
 }
 
 struct Piece {
@@ -201,11 +197,11 @@ fn render_office_text(text: &str, out: &mut Doc) {
                 continue;
             }
             '\u{14}' => {
-                if let Some(top) = fields.last_mut() {
-                    if *top {
-                        *top = false;
-                        in_code -= 1;
-                    }
+                if let Some(top) = fields.last_mut()
+                    && *top
+                {
+                    *top = false;
+                    in_code -= 1;
                 }
                 continue;
             }
