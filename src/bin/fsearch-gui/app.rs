@@ -6,6 +6,7 @@ use std::sync::mpsc::{Receiver, Sender, channel};
 use std::time::{Duration, Instant};
 
 use egui::{Context, Id, Key, Modifiers};
+use file_search::netpath;
 use file_search::platform;
 use file_search::query::Mode;
 use file_search::schema::default_index_dir;
@@ -81,12 +82,16 @@ pub enum Action {
     SearchInFolder(usize),
     UseExample(String),
     AddRoot(PathBuf),
+    /// Добавить папку по введённому адресу (например, `\\192.168.1.10\документы`).
+    AddRootText(String),
     PickRoot,
     PickFilterFolder,
     RemoveRoot(usize),
     OpenSettings,
     CloseSettings,
-    ApplySettings { force: bool },
+    ApplySettings {
+        force: bool,
+    },
     StopIndexing,
     ClearDirFilter,
     RecreateIndex,
@@ -127,6 +132,10 @@ pub struct App {
     dialog_rx: Receiver<DialogResult>,
     /// Диалог выбора папки уже открыт: второй не открываем.
     dialog_open: bool,
+    /// Адрес сетевой папки, который пользователь вводит вручную, и итог последней проверки.
+    pub net_input: String,
+    pub net_error: Option<String>,
+    pub net_checking: bool,
     toast_tx: Sender<String>,
     toast_rx: Receiver<String>,
     applied_theme: Theme,
@@ -141,6 +150,10 @@ enum DialogResult {
     FilterFolder(PathBuf),
     /// Диалог закрыт (выбрали папку или отказались).
     Closed,
+    /// Введённая сетевая папка отвечает.
+    NetRoot(PathBuf),
+    /// Введённую сетевую папку открыть не удалось: пояснение для пользователя.
+    NetFailed(String),
 }
 
 struct ScreenshotPlan {
@@ -246,6 +259,9 @@ impl App {
             dialog_tx,
             dialog_rx,
             dialog_open: false,
+            net_input: String::new(),
+            net_error: None,
+            net_checking: false,
             toast_tx,
             toast_rx,
             applied_theme: settings_theme,
@@ -385,6 +401,16 @@ impl App {
                 DialogResult::Closed => {
                     self.dialog_open = false;
                     self.focus_search = true;
+                }
+                DialogResult::NetRoot(path) => {
+                    self.net_checking = false;
+                    self.net_error = None;
+                    self.net_input.clear();
+                    self.handle_action(ctx, Action::AddRoot(path));
+                }
+                DialogResult::NetFailed(text) => {
+                    self.net_checking = false;
+                    self.net_error = Some(text);
                 }
             }
         }
@@ -552,6 +578,28 @@ impl App {
                 }
             }
             Action::OpenSettings => self.show_settings = true,
+            Action::AddRootText(text) => {
+                if self.net_checking {
+                    return;
+                }
+                match netpath::parse_user_path(&text) {
+                    Err(message) => self.net_error = Some(message),
+                    Ok(path) => {
+                        self.net_error = None;
+                        self.net_checking = true;
+                        let (tx, ctx) = (self.dialog_tx.clone(), ctx.clone());
+                        // Выключенный компьютер отвечает не сразу — проверяем в фоне, окно не замирает.
+                        std::thread::spawn(move || {
+                            let result = match netpath::check_dir(&path, netpath::NETWORK_TIMEOUT) {
+                                Ok(()) => DialogResult::NetRoot(path),
+                                Err(text) => DialogResult::NetFailed(text),
+                            };
+                            let _ = tx.send(result);
+                            ctx.request_repaint();
+                        });
+                    }
+                }
+            }
             Action::CloseSettings => {
                 self.show_settings = false;
                 self.confirm_reset = false;

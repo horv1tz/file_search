@@ -19,7 +19,11 @@ use tantivy::Index;
 use tantivy::indexer::IndexWriterOptions;
 
 use crate::indexer::{self, Excluder, Options, Progress, delete_path, index_tree, upsert_file, usable_roots};
+use crate::netpath::is_network_path;
 use crate::schema::Fields;
+
+/// Как часто полностью проверять папки на других компьютерах.
+const NETWORK_RESCAN_EVERY: Duration = Duration::from_secs(10 * 60);
 
 pub struct WatchOptions {
     pub index: Options,
@@ -96,6 +100,16 @@ pub fn watch(
     }
     let excluder = Excluder::new(&opts.index.excludes, opts.index.default_excludes, &opts.index.skip_dirs)?;
     let aliases = root_aliases(&roots);
+    // Сетевые папки уведомляют об изменениях ненадёжно (буфер небольшой, сервер может не сообщить о правках
+    // с других компьютеров), поэтому полная проверка там идёт чаще.
+    let network = roots.iter().any(|r| is_network_path(r));
+    let rescan_every = if network { opts.rescan_every.min(NETWORK_RESCAN_EVERY) } else { opts.rescan_every };
+    if network {
+        log(&format!(
+            "Есть сетевые папки: полная проверка каждые {} мин (уведомления по сети ненадёжны).",
+            rescan_every.as_secs() / 60
+        ));
+    }
 
     log("Первичная проверка индекса…");
     let s = indexer::run(index, fields, &opts.index, progress, cancel)?;
@@ -114,8 +128,10 @@ pub fn watch(
     for root in &roots {
         if let Err(e) = watcher.watch(root, RecursiveMode::Recursive) {
             log(&format!(
-                "Не удалось следить за {}: {e}. Изменения там будут подхвачены при периодической проверке.",
-                root.display()
+                "Не удалось следить за {}: {e}. Изменения там будут подхвачены при периодической проверке \
+                 (каждые {} мин).",
+                root.display(),
+                rescan_every.as_secs() / 60
             ));
         }
     }
@@ -185,7 +201,7 @@ pub fn watch(
         }
 
         let quiet = last_event.elapsed() >= opts.debounce;
-        if (rescan_needed && quiet) || last_scan.elapsed() >= opts.rescan_every {
+        if (rescan_needed && quiet) || last_scan.elapsed() >= rescan_every {
             match indexer::run(index, fields, &rescan_opts, progress, cancel) {
                 Ok(s) if s.indexed + s.removed > 0 => {
                     log(&format!("Полная проверка: обновлено {}, удалено {}", s.indexed, s.removed))

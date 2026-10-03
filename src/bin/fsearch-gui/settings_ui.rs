@@ -56,6 +56,10 @@ fn roots_section(ui: &mut Ui, app: &mut App, pal: &Palette, actions: &mut Vec<Ac
                 actions.push(Action::RemoveRoot(i));
             }
             ui.label(root.display().to_string());
+            if file_search::netpath::is_network_path(root) {
+                ui.label(RichText::new("сеть").size(12.0).color(pal.accent))
+                    .on_hover_text("Папка на другом компьютере: проверка изменений идёт каждые 10 минут");
+            }
         });
     }
     ui.add_space(4.0);
@@ -64,13 +68,16 @@ fn roots_section(ui: &mut Ui, app: &mut App, pal: &Palette, actions: &mut Vec<Ac
             actions.push(Action::PickRoot);
         }
         for (name, path) in &app.places {
-            if !app.settings.roots.iter().any(|r| path.starts_with(r))
+            if !app.settings.roots.iter().any(|r| file_search::schema::path_covers(r, path))
                 && ui.button(name).on_hover_text(path.display().to_string()).clicked()
             {
                 actions.push(Action::AddRoot(path.clone()));
             }
         }
     });
+    ui.add_space(4.0);
+    ui.label(RichText::new("Папка на другом компьютере").size(13.5).strong());
+    crate::views::network_input(ui, app, pal, actions);
     ui.add_space(4.0);
     if ui
         .checkbox(&mut app.settings.watch, "Следить за изменениями и обновлять индекс автоматически")

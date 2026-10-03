@@ -2,6 +2,7 @@ pub mod analyzer;
 pub mod extract;
 pub mod indexer;
 pub mod interactive;
+pub mod netpath;
 pub mod platform;
 pub mod query;
 pub mod render;

@@ -82,6 +82,18 @@ pub fn path_key(path: &str) -> String {
     if cfg!(any(windows, target_os = "macos")) { path.replace('\\', "/").to_lowercase() } else { path.to_string() }
 }
 
+/// `child` совпадает с `parent` или лежит внутри него. Регистр и вид разделителей учитываются так же, как в индексе
+/// (на Windows `\\Сервер\Папка` и `//сервер/папка` — один и тот же путь).
+pub fn path_covers(parent: &Path, child: &Path) -> bool {
+    let mut p = path_key(&parent.to_string_lossy());
+    while p.len() > 1 && p.ends_with('/') {
+        p.pop();
+    }
+    let prefix = if p.ends_with('/') { p.clone() } else { format!("{p}/") };
+    let c = path_key(&child.to_string_lossy());
+    c == p || c.starts_with(&prefix)
+}
+
 fn register(index: &Index) {
     index.tokenizers().register(TOKENIZER_NAME, analyzer::build());
     index.tokenizers().register(RAW_TOKENIZER_NAME, analyzer::build_raw());
@@ -131,4 +143,31 @@ pub fn open_or_create_index(dir: &Path) -> Result<(Index, Fields)> {
     register(&index);
     fs::write(dir.join(VERSION_FILE), format!("{FORMAT_VERSION}.{ANALYZER_VERSION}"))?;
     Ok((index, fields))
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn covers_respects_folder_boundaries() {
+        let p = Path::new;
+        assert!(path_covers(p("/data/docs"), p("/data/docs")));
+        assert!(path_covers(p("/data/docs"), p("/data/docs/2024/a.txt")));
+        assert!(path_covers(p("/data/docs/"), p("/data/docs/a.txt")));
+        assert!(!path_covers(p("/data/docs"), p("/data/docs2/a.txt")));
+        assert!(!path_covers(p("/data/docs/2024"), p("/data/docs")));
+        assert!(path_covers(p("/"), p("/anything")));
+    }
+
+    #[cfg(windows)]
+    #[test]
+    fn network_paths_compare_like_the_index_does() {
+        let p = Path::new;
+        assert!(path_covers(p(r"\\Server\Share"), p(r"\\server\share\Отчёты\a.xlsx")));
+        assert!(path_covers(p(r"\\server\share\"), p("//SERVER/share/x")));
+        assert!(!path_covers(p(r"\\server\share"), p(r"\\server\share2\x")));
+        assert!(!path_covers(p(r"\\server\share"), p(r"\\other\share\x")));
+        assert!(path_covers(p(r"C:\"), p(r"c:\Users\a.txt")));
+    }
 }

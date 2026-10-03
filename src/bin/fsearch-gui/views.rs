@@ -444,7 +444,7 @@ fn index_error(ui: &mut Ui, error: &str, pal: &Palette, actions: &mut Vec<Action
     });
 }
 
-fn onboarding(ui: &mut Ui, app: &App, pal: &Palette, actions: &mut Vec<Action>) {
+fn onboarding(ui: &mut Ui, app: &mut App, pal: &Palette, actions: &mut Vec<Action>) {
     ui.add_space(24.0);
     card(ui, pal, |ui| {
         ui.label(RichText::new("Добро пожаловать!").size(24.0).strong());
@@ -467,7 +467,45 @@ fn onboarding(ui: &mut Ui, app: &App, pal: &Palette, actions: &mut Vec<Action>) 
                 actions.push(Action::PickRoot);
             }
         });
+        ui.add_space(12.0);
+        ui.label(RichText::new("Папка на другом компьютере").strong());
+        network_input(ui, app, pal, actions);
     });
+}
+
+/// Поле для адреса сетевой папки: `\\192.168.1.10\документы`.
+pub fn network_input(ui: &mut Ui, app: &mut App, pal: &Palette, actions: &mut Vec<Action>) {
+    let mut submit = false;
+    ui.horizontal(|ui| {
+        let response = TextEdit::singleline(&mut app.net_input)
+            .hint_text("\\\\192.168.1.10\\документы")
+            .desired_width((ui.available_width() - 130.0).clamp(160.0, 420.0))
+            .show(ui)
+            .response;
+        if response.changed() {
+            app.net_error = None;
+        }
+        if response.lost_focus() && ui.input(|i| i.key_pressed(egui::Key::Enter)) {
+            submit = true;
+            // Enter снимает фокус с поля; возвращаем его, чтобы можно было сразу поправить адрес.
+            response.request_focus();
+        }
+        let label = if app.net_checking { "Проверяю…" } else { "Добавить" };
+        let ready = !app.net_checking && !app.net_input.trim().is_empty();
+        submit |= ui.add_enabled(ready, egui::Button::new(label)).clicked();
+    });
+    if submit && !app.net_checking && !app.net_input.trim().is_empty() {
+        actions.push(Action::AddRootText(app.net_input.clone()));
+    }
+    if let Some(error) = &app.net_error {
+        ui.label(RichText::new(error).size(12.5).color(pal.danger));
+    } else {
+        ui.label(
+            RichText::new("Нужен доступ к папке из проводника: если спросит пароль, один раз введите его там.")
+                .size(12.5)
+                .color(pal.muted),
+        );
+    }
 }
 
 const EXAMPLES: [(&str, &str); 8] = [

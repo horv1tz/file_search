@@ -6,7 +6,7 @@ use std::sync::RwLock;
 use std::sync::atomic::{AtomicBool, AtomicU64, AtomicUsize, Ordering};
 use std::time::{Duration, Instant, UNIX_EPOCH};
 
-use anyhow::{Context, Result, bail};
+use anyhow::{Context, Result, anyhow, bail};
 use globset::{GlobBuilder, GlobSet, GlobSetBuilder};
 use rayon::prelude::*;
 use tantivy::indexer::IndexWriterOptions;
@@ -15,6 +15,7 @@ use tantivy::{Index, IndexWriter, ReloadPolicy, TantivyDocument};
 use walkdir::WalkDir;
 
 use crate::extract::{EXTRACTOR_VERSION, Extracted, Limits, Status, UNIT_SEP, extract_file};
+use crate::netpath::{self, is_network_path};
 use crate::schema::{Fields, path_key};
 
 /// Папки, которые почти никогда не нужны в поиске.
@@ -143,9 +144,8 @@ pub fn normalize_root(root: &Path) -> Result<PathBuf> {
         root.to_path_buf()
     };
     let abs = std::path::absolute(&fixed).with_context(|| format!("некорректный путь {}", root.display()))?;
-    if !abs.is_dir() {
-        bail!("{} не существует или не является папкой", abs.display());
-    }
+    // Сетевая папка на выключенном компьютере отвечает не сразу — проверяем с ограничением по времени.
+    netpath::check_dir(&abs, netpath::NETWORK_TIMEOUT).map_err(|e| anyhow!("{e}"))?;
     Ok(abs)
 }
 
@@ -395,8 +395,13 @@ fn is_protected(key: &str, unreadable_files: &[String], unreadable_prefixes: &[S
 pub fn usable_roots(roots: &[PathBuf]) -> Result<(Vec<PathBuf>, Vec<String>)> {
     let mut good: Vec<PathBuf> = Vec::new();
     let mut problems: Vec<String> = Vec::new();
-    for root in roots {
-        match normalize_root(root) {
+    // Корни проверяем одновременно: несколько выключенных компьютеров не должны ждать друг друга по очереди.
+    let checked: Vec<Result<PathBuf>> = std::thread::scope(|scope| {
+        let handles: Vec<_> = roots.iter().map(|root| scope.spawn(move || normalize_root(root))).collect();
+        handles.into_iter().map(|h| h.join().unwrap_or_else(|_| Err(anyhow!("не удалось проверить папку")))).collect()
+    });
+    for result in checked {
+        match result {
             Ok(r) => good.push(r),
             Err(e) => problems.push(format!("{e:#}")),
         }
@@ -459,7 +464,8 @@ fn run_inner(
     // Что не удалось прочитать при обходе, то нельзя считать «пропавшим с диска»: папка может быть просто недоступна.
     let mut unreadable_prefixes: Vec<String> = Vec::new();
     let mut unreadable_files: Vec<String> = Vec::new();
-    'roots: for root in &roots {
+    'roots: for (root_index, root) in roots.iter().enumerate() {
+        let mut files_here = 0u64;
         let walker = WalkDir::new(root)
             .follow_links(false)
             .into_iter()
@@ -501,6 +507,7 @@ fn run_inner(
                 }
             };
             summary.scanned += 1;
+            files_here += 1;
             if summary.scanned % 1000 == 0 {
                 progress.scanning(summary.scanned);
             }
@@ -512,6 +519,20 @@ fn run_inner(
                     summary.unchanged += 1;
                 }
                 _ => todo.push(cand),
+            }
+        }
+        // Сетевая папка, отдавшая пустой список там, где раньше были файлы, почти наверняка просто недоступна
+        // (сервер перезагружается, пропали права). Записи о её файлах не удаляем.
+        if files_here == 0 && is_network_path(root) {
+            let prefix = &prefixes[root_index];
+            if existing.keys().any(|k| k.starts_with(prefix.as_str())) {
+                summary.walk_errors_total += 1;
+                summary.walk_errors.push(format!(
+                    "{}: сетевая папка сейчас пуста, хотя раньше в ней были файлы — похоже, она недоступна. \
+                     Записи о файлах сохранены",
+                    root.display()
+                ));
+                unreadable_prefixes.push(prefix.clone());
             }
         }
     }
@@ -531,7 +552,9 @@ fn run_inner(
     }
 
     // ---- индексация
-    let threads = opts.threads.max(1);
+    // Чтение по сети упирается в задержку, а не в процессор: потоков нужно больше, чем ядер.
+    let network = roots.iter().any(|r| is_network_path(r));
+    let threads = if network { opts.threads.max(8) } else { opts.threads.max(1) };
     let writer_opts = IndexWriterOptions::builder()
         .num_worker_threads(threads.clamp(1, 4))
         .memory_budget_per_thread(96 << 20)

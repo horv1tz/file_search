@@ -3,6 +3,7 @@
 use std::fs;
 use std::path::{Path, PathBuf};
 
+use file_search::schema::path_covers;
 use serde::{Deserialize, Serialize};
 
 #[derive(Clone, Copy, PartialEq, Eq, Serialize, Deserialize, Default, Debug)]
@@ -73,12 +74,12 @@ impl Settings {
     /// Добавляет папку, если её (или содержащей её папки) ещё нет; вложенные в неё убирает.
     /// Возвращает `true`, если список изменился.
     pub fn add_root(&mut self, root: PathBuf) -> bool {
-        if self.roots.iter().any(|r| root.starts_with(r)) {
+        if self.roots.iter().any(|r| path_covers(r, &root)) {
             return false;
         }
         // Папка, вернувшаяся в список, больше не ждёт удаления из индекса.
-        self.pending_removals.retain(|r| !r.starts_with(&root) && !root.starts_with(r));
-        self.roots.retain(|r| !r.starts_with(&root));
+        self.pending_removals.retain(|r| !path_covers(r, &root) && !path_covers(&root, r));
+        self.roots.retain(|r| !path_covers(&root, r));
         self.roots.push(root);
         true
     }
