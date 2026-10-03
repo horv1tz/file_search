@@ -164,7 +164,7 @@ struct ScreenshotPlan {
 
 fn open_error_text(e: &std::io::Error) -> String {
     if e.kind() == std::io::ErrorKind::NotFound {
-        "Не найдена программа для открытия файлов (на Windows это проводник, на Linux — xdg-open)".to_string()
+        "Файл или программа для его открытия не найдены (на Linux нужен xdg-open)".to_string()
     } else {
         format!("Не удалось открыть: {e}")
     }

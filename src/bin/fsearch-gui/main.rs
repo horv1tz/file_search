@@ -16,7 +16,6 @@ use std::io::Write;
 use std::net::TcpListener;
 use std::panic::{AssertUnwindSafe, catch_unwind};
 use std::path::PathBuf;
-use std::process::Command;
 use std::sync::Arc;
 use std::sync::atomic::{AtomicBool, Ordering};
 use std::time::{Duration, Instant};
@@ -33,14 +32,12 @@ const TITLE: &str = "Поиск файлов";
 const EXIT_WINDOW_FAILED: i32 = 3;
 /// Программа уже запущена: второй экземпляр просто закрывается.
 const EXIT_ALREADY_RUNNING: i32 = 4;
-/// Так быстро после запуска аварийное завершение считается сбоем драйвера, а не работой пользователя.
-const STARTUP_WINDOW: Duration = Duration::from_secs(20);
 
 /// Окно уже создано приложением: сбои после этого — не проблема драйвера, запасной рендерер не поможет.
 static APP_CREATED: AtomicBool = AtomicBool::new(false);
 
-/// Как показать окно. Запуск без ключа — «диспетчер»: он по очереди пробует способы в отдельных процессах,
-/// поэтому сбой драйвера (даже аварийный) не оставляет пользователя без программы.
+/// Как показать окно. Запуск без ключа выбирает способ сам (`choose_mode`); при неудаче открывается поиск в браузере.
+/// Способ можно задать вручную: `--renderer=wgpu`, `--renderer=glow` или `--renderer=browser`.
 #[derive(Clone, Copy, PartialEq, Eq, Debug)]
 enum Mode {
     Glow,
@@ -215,7 +212,8 @@ fn run_once(mode: Mode, launch: Launch) -> Result<(), String> {
 }
 
 /// Показывает окно выбранным способом. Возвращает код выхода процесса.
-fn run_window(mode: Mode, supervised: bool) -> i32 {
+/// `quiet` — не показывать окно с ошибкой (запасной режим откроется сам).
+fn run_window(mode: Mode, quiet: bool) -> i32 {
     let launch = parse_args();
     let _lock = match acquire_lock(&launch) {
         Lock::Held(f) => Some(f),
@@ -225,15 +223,9 @@ fn run_window(mode: Mode, supervised: bool) -> i32 {
             return EXIT_ALREADY_RUNNING;
         }
     };
-    // Только для проверки запасных путей в отладочной сборке: FSEARCH_GUI_FAIL=glow,wgpu (ошибка создания окна)
-    // и FSEARCH_GUI_CRASH=glow (аварийное завершение процесса).
+    // Только для проверки запасного пути в отладочной сборке: FSEARCH_GUI_FAIL=glow,wgpu (ошибка создания окна).
     let simulated = cfg!(debug_assertions)
         && std::env::var("FSEARCH_GUI_FAIL").is_ok_and(|v| v.split(',').any(|m| m.trim() == mode.name()));
-    if cfg!(debug_assertions)
-        && std::env::var("FSEARCH_GUI_CRASH").is_ok_and(|v| v.split(',').any(|m| m.trim() == mode.name()))
-    {
-        std::process::abort();
-    }
     let outcome = if simulated { Err("симуляция сбоя".to_string()) } else { run_once(mode, launch) };
     let Err(error) = outcome else { return 0 };
 
@@ -245,7 +237,7 @@ fn run_window(mode: Mode, supervised: bool) -> i32 {
         ));
         return 1;
     }
-    if !supervised {
+    if !quiet {
         show_error(&format!(
             "Не удалось открыть окно программы:\n{error}\n\nПодробности записаны в {}",
             log_path().display()
@@ -254,66 +246,35 @@ fn run_window(mode: Mode, supervised: bool) -> i32 {
     EXIT_WINDOW_FAILED
 }
 
-/// Завершение, похожее на падение драйвера: аварийный код Windows (0xC0000005, 0xC0000135…), паника или сигнал.
-fn looks_like_crash(code: Option<i32>) -> bool {
-    match code {
-        None => true,
-        Some(c) => c == 101 || (c as u32) >= 0xC000_0000,
+/// Выбирает способ отрисовки. На Windows окно рисуется через Direct3D 12 или Vulkan, если есть подходящий
+/// видеоадаптер (драйвер OpenGL при этом не трогается совсем), иначе через OpenGL. На остальных системах — OpenGL.
+fn choose_mode() -> Mode {
+    if cfg!(windows) && gpu_available() { Mode::Wgpu } else { Mode::Glow }
+}
+
+/// Спрашивает у системы, есть ли видеоадаптер для Direct3D 12 / Vulkan. Окно при этом не создаётся.
+#[cfg(windows)]
+fn gpu_available() -> bool {
+    use eframe::wgpu::{Backends, Instance, InstanceDescriptor, RequestAdapterOptions};
+    let backends = Backends::from_env().unwrap_or(Backends::DX12 | Backends::VULKAN);
+    let instance = Instance::new(&InstanceDescriptor { backends, ..Default::default() });
+    pollster::block_on(instance.request_adapter(&RequestAdapterOptions::default())).is_ok()
+}
+
+#[cfg(not(windows))]
+fn gpu_available() -> bool {
+    false
+}
+
+/// Обычный запуск: окно выбранным способом; если открыть его не удалось — поиск в браузере.
+fn auto() -> ! {
+    let mode = choose_mode();
+    log_line(&format!("Способ отрисовки: {}", mode.name()));
+    match run_window(mode, true) {
+        0 | EXIT_ALREADY_RUNNING => std::process::exit(0),
+        EXIT_WINDOW_FAILED => browser_mode("окно не удалось создать"),
+        code => std::process::exit(code),
     }
-}
-
-fn describe_exit(code: Option<i32>) -> String {
-    match code {
-        Some(c) if (c as u32) >= 0xC000_0000 => format!("код 0x{:08X}", c as u32),
-        Some(c) => format!("код {c}"),
-        None => "прервана сигналом".to_string(),
-    }
-}
-
-/// Запускает окно в отдельном процессе с очередным способом отрисовки; если не вышло — следующим;
-/// если не вышло ни одним — открывает поиск в браузере.
-fn supervise() -> ! {
-    let exe = match std::env::current_exe() {
-        Ok(exe) => exe,
-        Err(e) => {
-            log_line(&format!("Не удалось определить путь программы: {e}"));
-            std::process::exit(run_window(first_mode(), false));
-        }
-    };
-    let passthrough: Vec<String> = std::env::args().skip(1).collect();
-    let mut problems: Vec<String> = Vec::new();
-    for mode in [first_mode(), second_mode()] {
-        let started = Instant::now();
-        let status = Command::new(&exe)
-            .args(&passthrough)
-            .arg(format!("--renderer={}", mode.name()))
-            .env("FSEARCH_SUPERVISED", "1")
-            .status();
-        let problem = match status {
-            Ok(st) => match st.code() {
-                Some(0) => std::process::exit(0),
-                Some(EXIT_ALREADY_RUNNING) => std::process::exit(0),
-                Some(EXIT_WINDOW_FAILED) => "окно не удалось создать".to_string(),
-                code if started.elapsed() < STARTUP_WINDOW && looks_like_crash(code) => {
-                    format!("аварийное завершение при запуске ({})", describe_exit(code))
-                }
-                code => std::process::exit(code.unwrap_or(1)),
-            },
-            Err(e) => format!("процесс не запустился: {e}"),
-        };
-        log_line(&format!("Способ «{}»: {problem}", mode.name()));
-        problems.push(format!("{}: {problem}", mode.name()));
-    }
-    browser_mode(&problems.join("; "))
-}
-
-/// На Windows сначала Direct3D/Vulkan (не зависит от драйвера OpenGL), на остальных системах — OpenGL (быстрее стартует).
-fn first_mode() -> Mode {
-    if cfg!(windows) { Mode::Wgpu } else { Mode::Glow }
-}
-
-fn second_mode() -> Mode {
-    if cfg!(windows) { Mode::Glow } else { Mode::Wgpu }
 }
 
 // ------------------------------------------------------------------ запасной режим: поиск в браузере
@@ -414,7 +375,7 @@ fn main() {
     install_crash_log();
     match std::env::args().skip(1).find_map(|a| mode_flag(&a)) {
         Some(Mode::Browser) => browser_mode("запрошен режим браузера"),
-        Some(mode) => std::process::exit(run_window(mode, std::env::var_os("FSEARCH_SUPERVISED").is_some())),
-        None => supervise(),
+        Some(mode) => std::process::exit(run_window(mode, false)),
+        None => auto(),
     }
 }

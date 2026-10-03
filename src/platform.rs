@@ -2,12 +2,59 @@
 
 use std::io;
 use std::path::Path;
+#[cfg(not(windows))]
 use std::process::{Command, Stdio};
 
 use chrono::{Local, TimeZone};
 
+#[cfg(not(windows))]
 fn spawn(mut cmd: Command) -> io::Result<()> {
     cmd.stdin(Stdio::null()).stdout(Stdio::null()).stderr(Stdio::null()).spawn().map(|_| ())
+}
+
+/// Открывает файл, адрес или папку средствами оболочки Windows (как двойной щелчок в проводнике),
+/// без запуска посторонних процессов через командную строку.
+#[cfg(windows)]
+fn shell_execute(file: &std::ffi::OsStr, params: Option<&str>) -> io::Result<()> {
+    use std::ffi::{OsStr, c_void};
+    use std::os::windows::ffi::OsStrExt;
+    use std::ptr::{null, null_mut};
+
+    #[link(name = "shell32")]
+    unsafe extern "system" {
+        fn ShellExecuteW(
+            hwnd: *mut c_void,
+            operation: *const u16,
+            file: *const u16,
+            parameters: *const u16,
+            directory: *const u16,
+            show: i32,
+        ) -> isize;
+    }
+    const SW_SHOWNORMAL: i32 = 1;
+    // Коды ошибок ShellExecute: 2 и 3 — нет файла, 5 — доступ запрещён, 31 — нет программы для этого типа файлов.
+    const SE_ERR_NOASSOC: isize = 31;
+
+    let wide = |s: &OsStr| -> Vec<u16> { s.encode_wide().chain(std::iter::once(0)).collect() };
+    let operation = wide(OsStr::new("open"));
+    let file = wide(file);
+    let params = params.map(|p| wide(OsStr::new(p)));
+    // SAFETY: все строки оканчиваются нулём и живут до конца вызова; окно-владелец и каталог не заданы.
+    let result = unsafe {
+        ShellExecuteW(
+            null_mut(),
+            operation.as_ptr(),
+            file.as_ptr(),
+            params.as_ref().map_or(null(), |p| p.as_ptr()),
+            null(),
+            SW_SHOWNORMAL,
+        )
+    };
+    match result {
+        r if r > 32 => Ok(()),
+        SE_ERR_NOASSOC => Err(io::Error::other("для этого типа файлов не назначена программа")),
+        code => Err(io::Error::from_raw_os_error(code as i32)),
+    }
 }
 
 /// Такие файлы из интерфейса можно только показать в папке, но не запустить.
@@ -54,9 +101,7 @@ pub fn is_safe_to_open(path: &Path) -> bool {
 pub fn open_path(path: &Path) -> io::Result<()> {
     #[cfg(windows)]
     {
-        let mut cmd = Command::new("explorer");
-        cmd.arg(path);
-        spawn(cmd)
+        shell_execute(path.as_os_str(), None)
     }
     #[cfg(target_os = "macos")]
     {
@@ -76,9 +121,7 @@ pub fn open_path(path: &Path) -> io::Result<()> {
 pub fn open_url(url: &str) -> io::Result<()> {
     #[cfg(windows)]
     {
-        let mut cmd = Command::new("explorer");
-        cmd.arg(url);
-        spawn(cmd)
+        shell_execute(std::ffi::OsStr::new(url), None)
     }
     #[cfg(target_os = "macos")]
     {
@@ -98,10 +141,8 @@ pub fn open_url(url: &str) -> io::Result<()> {
 pub fn reveal_path(path: &Path) -> io::Result<()> {
     #[cfg(windows)]
     {
-        use std::os::windows::process::CommandExt;
-        let mut cmd = Command::new("explorer");
-        cmd.raw_arg(format!("/select,\"{}\"", path.display()));
-        spawn(cmd)
+        // Проводник с выделенным файлом: `explorer.exe /select,"путь"`.
+        shell_execute(std::ffi::OsStr::new("explorer.exe"), Some(&format!("/select,\"{}\"", path.display())))
     }
     #[cfg(target_os = "macos")]
     {

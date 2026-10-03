@@ -17,6 +17,9 @@ on:
 
 permissions:
   contents: write
+  # Подтверждение происхождения файлов: проверяется командой `gh attestation verify <файл> -R horv1tz/file_search`.
+  id-token: write
+  attestations: write
 
 env:
   CARGO_TERM_COLOR: always
@@ -63,7 +66,7 @@ jobs:
         run: |
           New-Item -ItemType Directory -Force dist | Out-Null
           Compress-Archive -Force -DestinationPath "dist/fsearch-$env:TAG-windows-x64.zip" -Path `
-            target/release/fsearch-gui.exe, target/release/fsearch.exe, README.md
+            target/release/fsearch-gui.exe, target/release/fsearch.exe, README.md, LICENSE
           # Отдельный exe окна — чтобы можно было скачать и запустить без распаковки.
           Copy-Item target/release/fsearch-gui.exe dist/fsearch-gui-windows-x64.exe
 
@@ -72,7 +75,7 @@ jobs:
         shell: bash
         run: |
           mkdir -p dist "pkg/fsearch-$TAG-${{ matrix.name }}"
-          cp target/release/fsearch-gui target/release/fsearch README.md "pkg/fsearch-$TAG-${{ matrix.name }}/"
+          cp target/release/fsearch-gui target/release/fsearch README.md LICENSE "pkg/fsearch-$TAG-${{ matrix.name }}/"
           tar -czf "dist/fsearch-$TAG-${{ matrix.name }}.tar.gz" -C pkg "fsearch-$TAG-${{ matrix.name }}"
 
       - uses: actions/upload-artifact@v4
@@ -96,6 +99,11 @@ jobs:
       - name: Контрольные суммы
         working-directory: dist
         run: sha256sum * > SHA256SUMS.txt && cat SHA256SUMS.txt
+
+      - name: Подтверждение происхождения сборки
+        uses: actions/attest-build-provenance@v2
+        with:
+          subject-path: dist/*
 
       - uses: softprops/action-gh-release@v2
         with:
