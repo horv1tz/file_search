@@ -57,6 +57,52 @@ fn shell_execute(file: &std::ffi::OsStr, params: Option<&str>) -> io::Result<()>
     }
 }
 
+/// Снижает (или возвращает) приоритет всего процесса: индексация уступает процессор другим программам.
+/// В Windows действует сразу на все потоки; в Linux и macOS — на потоки, созданные после вызова.
+pub fn set_low_priority(low: bool) {
+    #[cfg(windows)]
+    {
+        unsafe extern "system" {
+            fn GetCurrentProcess() -> isize;
+            fn SetPriorityClass(process: isize, class: u32) -> i32;
+        }
+        const BELOW_NORMAL_PRIORITY_CLASS: u32 = 0x4000;
+        const NORMAL_PRIORITY_CLASS: u32 = 0x20;
+        let class = if low { BELOW_NORMAL_PRIORITY_CLASS } else { NORMAL_PRIORITY_CLASS };
+        // SAFETY: псевдодескриптор текущего процесса всегда допустим.
+        unsafe {
+            SetPriorityClass(GetCurrentProcess(), class);
+        }
+    }
+    #[cfg(unix)]
+    {
+        // Вернуть обычный приоритет без прав администратора нельзя — тогда просто ничего не делаем.
+        // SAFETY: обычный системный вызов без указателей.
+        unsafe {
+            libc::setpriority(libc::PRIO_PROCESS as _, 0, if low { 10 } else { 0 });
+        }
+    }
+    #[cfg(not(any(windows, unix)))]
+    let _ = low;
+}
+
+/// Фоновый режим для текущего потока: низкий приоритет и процессора, и диска (в Windows). Так чтение тысяч файлов
+/// не заставляет остальные программы ждать диск.
+pub fn thread_background_mode() {
+    #[cfg(windows)]
+    {
+        unsafe extern "system" {
+            fn GetCurrentThread() -> isize;
+            fn SetThreadPriority(thread: isize, priority: i32) -> i32;
+        }
+        const THREAD_MODE_BACKGROUND_BEGIN: i32 = 0x0001_0000;
+        // SAFETY: псевдодескриптор текущего потока всегда допустим.
+        unsafe {
+            SetThreadPriority(GetCurrentThread(), THREAD_MODE_BACKGROUND_BEGIN);
+        }
+    }
+}
+
 /// Такие файлы из интерфейса можно только показать в папке, но не запустить.
 const NEVER_LAUNCH: &[&str] = &[
     "exe",
@@ -239,5 +285,25 @@ mod tests {
         assert!(parse_date_ms("2024-03-15", false).unwrap() < parse_date_ms("2024-03-15", true).unwrap());
         assert_eq!(parse_date_ms("15.03.2024", false), parse_date_ms("2024-03-15", false));
         assert!(parse_date_ms("вчера", false).is_none());
+    }
+
+    #[cfg(target_os = "linux")]
+    #[test]
+    fn low_priority_raises_the_nice_value() {
+        fn nice() -> i32 {
+            let stat = std::fs::read_to_string("/proc/thread-self/stat").unwrap();
+            // Название процесса может содержать пробелы, поэтому считаем поля после последней скобки: nice — 17-е.
+            let rest = stat.rsplit_once(')').unwrap().1;
+            rest.split_whitespace().nth(16).unwrap().parse().unwrap()
+        }
+        // Приоритет меняется только у потока, который вызвал функцию, — проверяем в отдельном потоке.
+        let (before, after) = std::thread::spawn(|| {
+            let before = nice();
+            set_low_priority(true);
+            (before, nice())
+        })
+        .join()
+        .unwrap();
+        assert!(after >= before.max(10), "{before} -> {after}");
     }
 }

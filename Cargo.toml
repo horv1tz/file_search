@@ -58,6 +58,9 @@ lto = "thin"
 codegen-units = 4
 # panic = "unwind" (по умолчанию) нужен: повреждённые файлы разбираются под catch_unwind
 
+[target.'cfg(unix)'.dependencies]
+libc = "0.2"
+
 [dev-dependencies]
 tempfile = "3.27.0"
 

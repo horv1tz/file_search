@@ -1784,6 +1784,7 @@ dependencies = [
  "globset",
  "image",
  "indicatif",
+ "libc",
  "lopdf",
  "notify",
  "pdf-extract",

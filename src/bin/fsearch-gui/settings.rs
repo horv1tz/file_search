@@ -15,9 +15,39 @@ pub enum Theme {
     Dark,
 }
 
+/// Сколько ресурсов компьютера можно тратить на индексацию.
+#[derive(Clone, Copy, PartialEq, Eq, Serialize, Deserialize, Default, Debug)]
+pub enum Load {
+    /// Один поток в фоновом режиме: почти незаметно, но дольше.
+    Minimal,
+    /// Половина ядер в фоновом режиме.
+    #[default]
+    Moderate,
+    /// Все ядра, кроме одного, с обычным приоритетом: быстрее всего.
+    Maximum,
+}
+
+impl Load {
+    /// Сколько потоков отдать индексации при `cores` ядрах.
+    pub fn threads(self, cores: usize) -> usize {
+        match self {
+            Load::Minimal => 1,
+            Load::Moderate => (cores / 2).max(1),
+            Load::Maximum => cores.saturating_sub(1).max(1),
+        }
+    }
+
+    /// Работать с пониженным приоритетом.
+    pub fn background(self) -> bool {
+        self != Load::Maximum
+    }
+}
+
 #[derive(Clone, Serialize, Deserialize, Debug, PartialEq)]
 #[serde(default)]
 pub struct Settings {
+    /// Нагрузка на компьютер при индексации.
+    pub load: Load,
     /// Папки и диски, по которым ищем.
     pub roots: Vec<PathBuf>,
     /// Следить за изменениями и обновлять индекс автоматически.
@@ -38,6 +68,7 @@ pub struct Settings {
 impl Default for Settings {
     fn default() -> Self {
         Settings {
+            load: Load::default(),
             roots: Vec::new(),
             watch: true,
             excludes: Vec::new(),
@@ -131,6 +162,13 @@ mod tests {
         assert_eq!(s.remove_root(9), None);
         assert!(s.add_root(PathBuf::from("/data/a/sub")), "папку (или её часть) вернули — удаление отменяется");
         assert!(s.pending_removals.is_empty());
+    }
+
+    #[test]
+    fn load_levels_pick_threads_and_priority() {
+        assert_eq!([Load::Minimal, Load::Moderate, Load::Maximum].map(|l| l.threads(8)), [1, 4, 7]);
+        assert_eq!([Load::Minimal, Load::Moderate, Load::Maximum].map(|l| l.threads(1)), [1, 1, 1]);
+        assert!(Load::Minimal.background() && Load::Moderate.background() && !Load::Maximum.background());
     }
 
     #[test]

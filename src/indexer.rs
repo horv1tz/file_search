@@ -21,6 +21,31 @@ use crate::schema::{Fields, path_key};
 /// Папки, которые почти никогда не нужны в поиске.
 const DEFAULT_EXCLUDED_DIRS: &[&str] =
     &["$recycle.bin", "system volume information", ".git", ".svn", ".hg", "node_modules", "__pycache__"];
+/// Системные и служебные папки Windows: тысячи чужих файлов, которые не нужны в поиске и сильно нагружают диск.
+const DEFAULT_EXCLUDED_DIRS_WINDOWS: &[&str] =
+    &["windows.old", "$windows.~bt", "$windows.~ws", "msocache", "perflogs", "recovery", "gpucache", "code cache"];
+
+/// Папки, которые пропускаются по полному пути (из переменных окружения Windows).
+fn windows_system_dirs() -> Vec<PathBuf> {
+    if !cfg!(windows) {
+        return Vec::new();
+    }
+    let var = |name: &str| std::env::var_os(name).map(PathBuf::from);
+    let mut dirs = Vec::new();
+    for name in ["SystemRoot", "ProgramFiles", "ProgramFiles(x86)", "ProgramW6432", "ProgramData"] {
+        dirs.extend(var(name));
+    }
+    if let Some(local) = var("LOCALAPPDATA") {
+        for sub in ["Temp", "Microsoft", "Packages", "Google", "Programs", "Mozilla", "BraveSoftware"] {
+            dirs.push(local.join(sub));
+        }
+    }
+    if let Some(roaming) = var("APPDATA") {
+        dirs.push(roaming.join("Microsoft"));
+    }
+    dirs
+}
+
 const DEFAULT_EXCLUDED_FILES: &[&str] = &["thumbs.db", "desktop.ini", ".ds_store"];
 
 /// Сколько текста накапливаем в памяти между коммитами.
@@ -43,6 +68,8 @@ pub struct Options {
     /// Папки, которые нельзя индексировать ни при каких условиях (прежде всего — каталог самого индекса:
     /// иначе его файлы попадали бы в индекс и порождали бы бесконечный цикл обновлений).
     pub skip_dirs: Vec<PathBuf>,
+    /// Читать файлы в фоновом режиме (низкий приоритет процессора и диска), чтобы не мешать работе за компьютером.
+    pub background: bool,
 }
 
 impl Options {
@@ -56,6 +83,7 @@ impl Options {
             force: false,
             commit_every: None,
             skip_dirs: Vec::new(),
+            background: false,
         }
     }
 }
@@ -256,6 +284,10 @@ pub struct Excluder {
 
 impl Excluder {
     pub fn new(patterns: &[String], defaults: bool, skip_dirs: &[PathBuf]) -> Result<Excluder> {
+        let mut skip_dirs = skip_dirs.to_vec();
+        if defaults {
+            skip_dirs.extend(windows_system_dirs());
+        }
         let skip_dirs = skip_dirs
             .iter()
             .map(|d| path_key(&d.to_string_lossy()).trim_end_matches('/').to_string())
@@ -274,7 +306,10 @@ impl Excluder {
         }
         let name = path.file_name().map(|n| n.to_string_lossy().to_lowercase()).unwrap_or_default();
         if self.defaults {
-            if is_dir && DEFAULT_EXCLUDED_DIRS.contains(&name.as_str()) {
+            if is_dir
+                && (DEFAULT_EXCLUDED_DIRS.contains(&name.as_str())
+                    || (cfg!(windows) && DEFAULT_EXCLUDED_DIRS_WINDOWS.contains(&name.as_str())))
+            {
                 return true;
             }
             if !is_dir
@@ -557,7 +592,7 @@ fn run_inner(
     let threads = if network { opts.threads.max(8) } else { opts.threads.max(1) };
     let writer_opts = IndexWriterOptions::builder()
         .num_worker_threads(threads.clamp(1, 4))
-        .memory_budget_per_thread(96 << 20)
+        .memory_budget_per_thread(48 << 20)
         .build();
     let writer: RwLock<IndexWriter> = RwLock::new(index.writer_with_options(writer_opts)?);
 
@@ -577,7 +612,15 @@ fn run_inner(
     let failures = std::sync::Mutex::new(Vec::<(PathBuf, String)>::new());
     let commit_error = std::sync::Mutex::new(None::<anyhow::Error>);
 
-    let pool = rayon::ThreadPoolBuilder::new().num_threads(threads).build()?;
+    let background = opts.background;
+    let pool = rayon::ThreadPoolBuilder::new()
+        .num_threads(threads)
+        .start_handler(move |_| {
+            if background {
+                crate::platform::thread_background_mode();
+            }
+        })
+        .build()?;
     pool.install(|| {
         todo.par_iter().for_each(|c| {
             if cancel.load(Ordering::Relaxed) {
@@ -710,5 +753,16 @@ mod tests {
         assert!(!ex.excluded(&dir.path().join("idx2"), true), "папка с похожим именем не исключается");
         assert!(ex.excluded_in_roots(&index.join("segment.idx"), false, &[dir.path().to_path_buf()]));
         assert!(!ex.excluded_in_roots(&dir.path().join("doc.txt"), false, &[dir.path().to_path_buf()]));
+    }
+
+    #[cfg(windows)]
+    #[test]
+    fn windows_system_folders_are_skipped_by_default() {
+        let system = PathBuf::from(std::env::var_os("SystemRoot").expect("в Windows задана SystemRoot"));
+        assert!(Excluder::new(&[], true, &[]).unwrap().excluded(&system, true));
+        assert!(
+            !Excluder::new(&[], false, &[]).unwrap().excluded(&system, true),
+            "без исключений по умолчанию — читаем всё"
+        );
     }
 }

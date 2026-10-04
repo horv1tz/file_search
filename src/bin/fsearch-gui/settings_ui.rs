@@ -6,6 +6,7 @@ use egui::{Align2, Color32, ComboBox, Context, ProgressBar, RichText, TextEdit, 
 use file_search::platform::format_size;
 
 use crate::app::{Action, App};
+use crate::settings::Load;
 use crate::settings::Theme;
 use crate::theme::{self, Palette};
 use crate::views::shorten;
@@ -75,6 +76,28 @@ fn roots_section(ui: &mut Ui, app: &mut App, pal: &Palette, actions: &mut Vec<Ac
             }
         }
     });
+    ui.add_space(4.0);
+    ui.horizontal(|ui| {
+        ui.label("Нагрузка на компьютер:");
+        let label = |l: Load| match l {
+            Load::Minimal => "Минимальная (1 поток)",
+            Load::Moderate => "Умеренная (половина ядер)",
+            Load::Maximum => "Максимальная (быстрее всего)",
+        };
+        let before = app.settings.load;
+        ComboBox::from_id_salt("load").selected_text(label(app.settings.load)).show_ui(ui, |ui| {
+            for l in [Load::Minimal, Load::Moderate, Load::Maximum] {
+                ui.selectable_value(&mut app.settings.load, l, label(l));
+            }
+        });
+        if app.settings.load != before {
+            actions.push(Action::ApplySettings { force: false });
+        }
+    })
+    .response
+    .on_hover_text(
+        "Индексация работает в фоне с пониженным приоритетом; чем ниже нагрузка, тем дольше первая индексация",
+    );
     ui.add_space(4.0);
     ui.label(RichText::new("Папка на другом компьютере").size(13.5).strong());
     crate::views::network_input(ui, app, pal, actions);

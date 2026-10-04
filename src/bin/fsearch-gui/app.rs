@@ -220,6 +220,7 @@ impl App {
         theme::apply(ctx, settings.theme);
         let index_dir = settings.index_dir.clone().unwrap_or_else(default_index_dir);
         let settings_theme = settings.theme;
+        platform::set_low_priority(settings.load.background());
 
         let (backend, backend_error) = match Backend::new(ctx.clone(), index_dir.clone()) {
             Ok(b) => (Some(b), None),
@@ -304,6 +305,7 @@ impl App {
             self.excludes_text.lines().map(str::trim).filter(|l| !l.is_empty()).map(str::to_string).collect();
         theme::apply(ctx, self.settings.theme);
         self.applied_theme = self.settings.theme;
+        platform::set_low_priority(self.settings.load.background());
         self.save_settings();
         self.start_indexing(force);
         self.mark_dirty(true);
@@ -776,7 +778,8 @@ impl eframe::App for App {
         if let Some(backend) = &self.backend
             && backend.state.running.load(Ordering::Relaxed)
         {
-            ctx.request_repaint_after(Duration::from_millis(150));
+            // Полоса прогресса не требует частой перерисовки: так окно почти не грузит процессор.
+            ctx.request_repaint_after(Duration::from_millis(400));
         }
         self.drive_screenshot(ctx);
     }

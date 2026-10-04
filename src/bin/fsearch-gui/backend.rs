@@ -245,8 +245,9 @@ pub fn scan_options(settings: &Settings, roots: Vec<PathBuf>, index_dir: &Path) 
     opts.excludes = settings.excludes.clone();
     opts.default_excludes = settings.default_excludes;
     opts.limits = Limits { max_text_bytes: settings.max_text_mb.max(1) << 20, ..Limits::default() };
-    // Одно ядро оставляем окну и остальным программам; найденное сохраняем каждые несколько секунд.
-    opts.threads = std::thread::available_parallelism().map_or(2, |n| n.get().saturating_sub(1).max(1));
+    // Сколько ядер отдать индексации и с каким приоритетом, выбирает пользователь; найденное сохраняем каждые 5 секунд.
+    opts.threads = settings.load.threads(std::thread::available_parallelism().map_or(2, |n| n.get()));
+    opts.background = settings.load.background();
     opts.commit_every = Some(Duration::from_secs(5));
     opts
 }

@@ -76,6 +76,9 @@ struct ScanArgs {
     /// Число потоков (по умолчанию — по числу ядер)
     #[arg(short = 'j', long)]
     threads: Option<usize>,
+    /// Работать в фоне: низкий приоритет процессора и диска, чтобы не мешать другим программам
+    #[arg(long)]
+    low_priority: bool,
     /// Максимум текста из одного файла, МБ
     #[arg(long, default_value_t = 16, value_name = "МБ")]
     max_text_mb: usize,
@@ -93,6 +96,10 @@ impl ScanArgs {
         opts.default_excludes = !self.no_default_excludes;
         if let Some(t) = self.threads {
             opts.threads = t.max(1);
+        }
+        if self.low_priority {
+            opts.background = true;
+            file_search::platform::set_low_priority(true);
         }
         opts.limits =
             Limits { max_text_bytes: self.max_text_mb.max(1) << 20, max_file_size: self.max_file_mb.max(1) << 20 };
