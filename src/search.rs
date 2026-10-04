@@ -6,6 +6,7 @@ use std::path::Path;
 use std::time::{Duration, Instant};
 
 use anyhow::Result;
+use rayon::prelude::*;
 use tantivy::collector::{Count, TopDocs};
 use tantivy::query::{BooleanQuery, Occur, Query, TermQuery};
 use tantivy::schema::{IndexRecordOption, OwnedValue, Term, Value};
@@ -112,6 +113,8 @@ pub struct IndexStats {
     pub by_status: Vec<(String, u64)>,
 }
 
+/// Дёшево копируется: все части — счётчики ссылок, поэтому один и тот же индекс читают несколько потоков.
+#[derive(Clone)]
 pub struct Searcher {
     index: Index,
     fields: Fields,
@@ -132,7 +135,12 @@ fn u64_of(doc: &TantivyDocument, field: tantivy::schema::Field) -> u64 {
 impl Searcher {
     /// `live` — следить за коммитами индекса (для долгоживущего сервера).
     pub fn open(dir: &Path, live: bool) -> Result<Searcher> {
-        let (index, fields) = open_index(dir)?;
+        let (mut index, fields) = open_index(dir)?;
+        // Сегменты индекса просматриваются параллельно: чем больше ядер, тем быстрее поиск по большому индексу.
+        let threads = std::thread::available_parallelism().map_or(1, |n| n.get()).min(8);
+        if threads > 1 {
+            let _ = index.set_multithread_executor(threads);
+        }
         let policy = if live { ReloadPolicy::OnCommitWithDelay } else { ReloadPolicy::Manual };
         let reader = index.reader_builder().reload_policy(policy).try_into()?;
         Ok(Searcher { index, fields, reader })
@@ -193,30 +201,64 @@ impl Searcher {
             None
         };
 
-        let mut hits = Vec::with_capacity(addresses.len());
-        for (score, addr) in addresses {
-            let doc: TantivyDocument = searcher.doc(addr)?;
-            let f = &self.fields;
-            let path = str_of(&doc, f.path).to_string();
-            let name =
-                Path::new(&path).file_name().map(|n| n.to_string_lossy().into_owned()).unwrap_or_else(|| path.clone());
-            let (snippet, location) = match &highlighter {
-                Some(g) => snippet_for(g, str_of(&doc, f.content), str_of(&doc, f.units)),
-                None => (None, None),
-            };
-            hits.push(Hit {
-                path,
-                name,
-                ext: str_of(&doc, f.ext).to_string(),
-                size: u64_of(&doc, f.size),
-                modified_ms: u64_of(&doc, f.mtime),
-                score,
-                location,
-                snippet,
-                status: str_of(&doc, f.status).to_string(),
-            });
-        }
+        // Чтение сохранённых полей и подсветка у каждого файла независимы — делаем их одновременно.
+        let hits: Vec<Hit> = addresses
+            .par_iter()
+            .map(|(score, addr)| -> Result<Hit> {
+                let doc: TantivyDocument = searcher.doc(*addr)?;
+                let f = &self.fields;
+                let path = str_of(&doc, f.path).to_string();
+                let name = Path::new(&path)
+                    .file_name()
+                    .map(|n| n.to_string_lossy().into_owned())
+                    .unwrap_or_else(|| path.clone());
+                let (snippet, location) = match &highlighter {
+                    Some(g) => snippet_for(g, str_of(&doc, f.content), str_of(&doc, f.units)),
+                    None => (None, None),
+                };
+                Ok(Hit {
+                    path,
+                    name,
+                    ext: str_of(&doc, f.ext).to_string(),
+                    size: u64_of(&doc, f.size),
+                    modified_ms: u64_of(&doc, f.mtime),
+                    score: *score,
+                    location,
+                    snippet,
+                    status: str_of(&doc, f.status).to_string(),
+                })
+            })
+            .collect::<Result<Vec<_>>>()?;
         Ok(SearchResult { total, hits, took: started.elapsed() })
+    }
+
+    /// Сколько файлов найдётся в каждой группе типов при тех же запросе и фильтрах (кроме выбора типов).
+    /// Нужно для счётчиков на кнопках «Word», «Excel»…; группы считаются параллельно.
+    pub fn count_groups(&self, opts: &SearchOptions, groups: &[Vec<String>]) -> Result<Vec<usize>> {
+        let searcher = self.reader.searcher();
+        let parsed = query::parse(&opts.query);
+        groups
+            .par_iter()
+            .map(|exts| -> Result<usize> {
+                let filters = Filters {
+                    exts: exts.clone(),
+                    dirs: opts.dirs.clone(),
+                    min_size: opts.min_size,
+                    max_size: opts.max_size,
+                    modified_after: opts.modified_after,
+                    modified_before: opts.modified_before,
+                };
+                let (mut analyzer, mut raw_analyzer) = self.analyzers();
+                let q = Compiler {
+                    fields: &self.fields,
+                    analyzer: &mut analyzer,
+                    raw_analyzer: &mut raw_analyzer,
+                    mode: opts.mode,
+                }
+                .compile(&parsed, &filters)?;
+                Ok(searcher.search(&q, &Count)?)
+            })
+            .collect()
     }
 
     /// Генератор сниппетов по словам запроса (с раскрытием префиксов по словарю индекса).

@@ -15,6 +15,10 @@ use file_search::search::{Hit, Snippet, Sort};
 use crate::app::{Action, App, SEARCH_ID};
 use crate::theme::{self, GROUPS, Palette};
 
+/// Ширина окна, начиная с которой справа показывается панель подробностей о выбранном файле.
+const DETAILS_MIN_WIDTH: f32 = 900.0;
+const DETAILS_WIDTH: f32 = 290.0;
+
 pub fn draw(ctx: &Context, app: &mut App, actions: &mut Vec<Action>) {
     let dark = ctx.style().visuals.dark_mode;
     let pal = theme::palette(dark);
@@ -22,10 +26,28 @@ pub fn draw(ctx: &Context, app: &mut App, actions: &mut Vec<Action>) {
 
     egui::TopBottomPanel::top("header")
         .frame(Frame::new().fill(fill).inner_margin(Margin { left: 16, right: 16, top: 14, bottom: 8 }))
-        .show(ctx, |ui| header(ui, app, actions));
+        .show(ctx, |ui| header(ui, app, &pal, dark, actions));
     egui::TopBottomPanel::bottom("status")
         .frame(Frame::new().fill(fill).stroke(Stroke::new(1.0, pal.line)).inner_margin(Margin::symmetric(16, 6)))
         .show(ctx, |ui| status_bar(ui, app, &pal, actions));
+    let details = ctx.content_rect().width() >= DETAILS_MIN_WIDTH
+        && app.backend_error.is_none()
+        && app.search_error.is_none()
+        && !app.form.is_empty()
+        && app.selected.is_some_and(|i| i < app.results.len());
+    app.details_visible = details;
+    if details {
+        egui::SidePanel::right("details")
+            .exact_width(DETAILS_WIDTH)
+            .resizable(false)
+            .frame(Frame::new().fill(pal.card).stroke(Stroke::new(1.0, pal.line)).inner_margin(Margin {
+                left: 16,
+                right: 16,
+                top: 16,
+                bottom: 12,
+            }))
+            .show(ctx, |ui| details_panel(ui, app, &pal, dark, actions));
+    }
     egui::CentralPanel::default()
         .frame(Frame::new().fill(fill).inner_margin(Margin::symmetric(16, 4)))
         .show(ctx, |ui| central(ui, app, &pal, dark, actions));
@@ -33,40 +55,101 @@ pub fn draw(ctx: &Context, app: &mut App, actions: &mut Vec<Action>) {
 
 // ------------------------------------------------------------------ шапка
 
-fn header(ui: &mut Ui, app: &mut App, actions: &mut Vec<Action>) {
+/// Лупа, нарисованная кистью: в системных шрифтах нужного значка может не оказаться.
+fn magnifier(ui: &mut Ui, color: Color32) {
+    let (rect, _) = ui.allocate_exact_size(vec2(20.0, 20.0), Sense::hover());
+    let painter = ui.painter();
+    let stroke = Stroke::new(2.0, color);
+    let center = rect.center() - vec2(1.5, 1.5);
+    painter.circle_stroke(center, 6.0, stroke);
+    painter.line_segment([center + vec2(4.3, 4.3), center + vec2(9.0, 9.0)], stroke);
+}
+
+/// Кнопка-«таблетка» фильтра: выбранная закрашена цветом акцента.
+fn pill(ui: &mut Ui, text: String, on: bool, pal: &Palette, dark: bool) -> egui::Response {
+    let (fill, fg, line) = if on {
+        let fg = if dark { Color32::from_rgb(0x0b, 0x14, 0x2b) } else { Color32::WHITE };
+        (pal.accent, fg, pal.accent)
+    } else {
+        (Color32::TRANSPARENT, ui.visuals().text_color(), pal.line)
+    };
+    ui.add(
+        egui::Button::new(RichText::new(text).color(fg).size(13.5))
+            .fill(fill)
+            .stroke(Stroke::new(1.0, line))
+            .corner_radius(14.0)
+            .min_size(vec2(0.0, 28.0)),
+    )
+}
+
+fn header(ui: &mut Ui, app: &mut App, pal: &Palette, dark: bool, actions: &mut Vec<Action>) {
     let mut changed = false;
+    let search_id = Id::new(SEARCH_ID);
+    let focused = ui.ctx().memory(|m| m.has_focus(search_id));
     ui.horizontal(|ui| {
-        let button_width = 110.0;
-        let output = TextEdit::singleline(&mut app.form.query)
-            .id(Id::new(SEARCH_ID))
-            .hint_text("Имя файла или слова из содержимого…")
-            .font(FontId::proportional(18.0))
-            .margin(Margin::symmetric(10, 8))
-            .desired_width((ui.available_width() - button_width - 30.0).max(160.0))
-            .show(ui);
-        if output.response.has_focus() {
-            // Esc очищает запрос, а не уводит фокус из поля: иначе дальнейший набор уходил бы в пустоту.
-            ui.memory_mut(|m| {
-                m.set_focus_lock_filter(
-                    output.response.id,
-                    egui::EventFilter { escape: true, horizontal_arrows: true, vertical_arrows: true, tab: false },
-                )
+        let settings_width = 118.0;
+        let box_width = (ui.available_width() - settings_width - 14.0).max(220.0);
+        Frame::new()
+            .fill(ui.visuals().extreme_bg_color)
+            .stroke(Stroke::new(if focused { 1.6 } else { 1.0 }, if focused { pal.accent } else { pal.line }))
+            .corner_radius(13.0)
+            .inner_margin(Margin::symmetric(12, 5))
+            .show(ui, |ui| {
+                ui.set_width(box_width - 26.0);
+                ui.horizontal(|ui| {
+                    magnifier(ui, if focused { pal.accent } else { pal.muted });
+                    let clear_width = 26.0;
+                    let output = TextEdit::singleline(&mut app.form.query)
+                        .id(search_id)
+                        .frame(false)
+                        .hint_text("Имя файла или слова из содержимого…")
+                        .font(FontId::proportional(18.0))
+                        .margin(Margin::symmetric(4, 6))
+                        .desired_width((ui.available_width() - clear_width - 22.0).max(80.0))
+                        .show(ui);
+                    if output.response.has_focus() {
+                        // Esc очищает запрос, а не уводит фокус из поля: иначе дальнейший набор уходил бы в пустоту.
+                        ui.memory_mut(|m| {
+                            m.set_focus_lock_filter(
+                                output.response.id,
+                                egui::EventFilter {
+                                    escape: true,
+                                    horizontal_arrows: true,
+                                    vertical_arrows: true,
+                                    tab: false,
+                                },
+                            )
+                        });
+                    }
+                    if app.focus_search {
+                        output.response.request_focus();
+                        // При Ctrl+F выделяем весь запрос, чтобы его можно было сразу заменить.
+                        let mut state = output.state.clone();
+                        let end = app.form.query.chars().count();
+                        state.cursor.set_char_range(Some(CCursorRange::two(CCursor::new(0), CCursor::new(end))));
+                        state.store(ui.ctx(), output.response.id);
+                        app.focus_search = false;
+                    }
+                    changed |= output.response.changed();
+                    if app.searching {
+                        ui.spinner();
+                    } else if !app.form.query.is_empty()
+                        && ui
+                            .add(egui::Button::new(RichText::new("×").size(18.0).color(pal.muted)).frame(false))
+                            .on_hover_text("Очистить (Esc)")
+                            .clicked()
+                    {
+                        app.form.query.clear();
+                        changed = true;
+                        app.focus_search = true;
+                    }
+                });
             });
-        }
-        if app.focus_search {
-            output.response.request_focus();
-            // При Ctrl+F выделяем весь запрос, чтобы его можно было сразу заменить.
-            let mut state = output.state.clone();
-            let end = app.form.query.chars().count();
-            state.cursor.set_char_range(Some(CCursorRange::two(CCursor::new(0), CCursor::new(end))));
-            state.store(ui.ctx(), output.response.id);
-            app.focus_search = false;
-        }
-        changed |= output.response.changed();
-        if app.searching {
-            ui.spinner();
-        }
-        if ui.add_sized([button_width, 36.0], egui::Button::new("Индексация")).clicked() {
+        if ui
+            .add_sized([settings_width, 38.0], egui::Button::new("Настройки").corner_radius(13.0))
+            .on_hover_text("Папки для поиска, индексация, тема")
+            .clicked()
+        {
             actions.push(Action::OpenSettings);
         }
     });
@@ -74,7 +157,12 @@ fn header(ui: &mut Ui, app: &mut App, actions: &mut Vec<Action>) {
     ui.horizontal_wrapped(|ui| {
         for (i, (name, _)) in GROUPS.iter().enumerate() {
             let on = app.form.groups[i];
-            if ui.add(egui::Button::new(*name).selected(on).min_size(vec2(0.0, 26.0))).clicked() {
+            let count = app.facets.as_ref().and_then(|f| f.get(i)).filter(|_| !app.form.is_empty());
+            let text = match count {
+                Some(n) => format!("{name}  {n}"),
+                None => (*name).to_string(),
+            };
+            if pill(ui, text, on, pal, dark).clicked() {
                 app.form.groups[i] = !on;
                 changed = true;
             }
@@ -136,15 +224,12 @@ pub fn shorten(text: &str, max: usize) -> String {
 
 fn status_bar(ui: &mut Ui, app: &App, pal: &Palette, actions: &mut Vec<Action>) {
     ui.horizontal(|ui| {
-        let left = if app.form.is_empty() {
-            if app.num_docs > 0 { format!("В индексе файлов: {}", app.num_docs) } else { String::new() }
-        } else if app.pending() && app.results.is_empty() {
-            "Поиск…".to_string()
-        } else if app.search_error.is_some() {
+        let left = if app.search_error.is_some() && !app.form.is_empty() {
             "Ошибка поиска".to_string()
+        } else if app.num_docs > 0 {
+            format!("В индексе файлов: {}", app.num_docs)
         } else {
-            let shown = app.results.len();
-            format!("Найдено файлов: {} · показано {} · {:.0} мс", app.total, shown, app.took_ms.max(1.0))
+            String::new()
         };
         ui.label(RichText::new(left).size(12.5).color(pal.muted));
 
@@ -235,6 +320,18 @@ fn central(ui: &mut Ui, app: &mut App, pal: &Palette, dark: bool, actions: &mut 
 }
 
 fn results_list(ui: &mut Ui, app: &mut App, pal: &Palette, dark: bool, actions: &mut Vec<Action>) {
+    let details_visible = app.details_visible;
+    ui.add_space(2.0);
+    ui.label(
+        RichText::new(format!(
+            "Найдено файлов: {} · показано {} · {:.0} мс",
+            app.total,
+            app.results.len(),
+            app.took_ms.max(1.0)
+        ))
+        .size(12.5)
+        .color(pal.muted),
+    );
     let mut scroll = egui::ScrollArea::vertical().id_salt("results").auto_shrink([false, false]);
     if app.scroll_to_top {
         scroll = scroll.vertical_scroll_offset(0.0);
@@ -246,7 +343,7 @@ fn results_list(ui: &mut Ui, app: &mut App, pal: &Palette, dark: bool, actions: 
         let mut last_visible = false;
         for (i, hit) in app.results.iter().enumerate() {
             let selected = app.selected == Some(i);
-            let rect = hit_row(ui, i, hit, selected, pal, dark, actions);
+            let rect = hit_row(ui, i, hit, selected, !details_visible, pal, dark, actions);
             if selected && app.scroll_to_selected {
                 ui.scroll_to_rect(rect, None);
             }
@@ -263,11 +360,13 @@ fn results_list(ui: &mut Ui, app: &mut App, pal: &Palette, dark: bool, actions: 
     }
 }
 
-/// Значок типа файла (цветная «таблетка» с расширением).
-fn badge(ui: &mut Ui, text: &str, color: Color32) {
-    let galley = ui.painter().layout_no_wrap(text.to_string(), FontId::proportional(11.0), Color32::WHITE);
-    let (rect, _) = ui.allocate_exact_size(galley.size() + vec2(12.0, 6.0), Sense::hover());
-    ui.painter().rect_filled(rect, 5.0, color);
+/// Значок файла: цветная плитка с расширением.
+fn file_tile(ui: &mut Ui, label: &str, color: Color32, size: f32) {
+    let (rect, _) = ui.allocate_exact_size(vec2(size, size), Sense::hover());
+    ui.painter().rect_filled(rect, size * 0.24, color);
+    let text: String = label.chars().take(4).collect();
+    let font = (size * 0.27).clamp(9.5, 15.0);
+    let galley = ui.painter().layout_no_wrap(text, FontId::proportional(font), Color32::WHITE);
     ui.painter().galley(rect.center() - galley.size() / 2.0, galley, Color32::WHITE);
 }
 
@@ -297,12 +396,30 @@ fn snippet_job(snippet: &Snippet, pal: &Palette, text_color: Color32, width: f32
     job
 }
 
+/// Папка, в которой лежит файл (без имени самого файла).
+fn parent_of(path: &str) -> String {
+    std::path::Path::new(path).parent().map(|p| p.display().to_string()).unwrap_or_else(|| path.to_string())
+}
+
+/// Пояснение к файлам, у которых текста нет: пароль или скан.
+fn status_note(status: &str) -> Option<&'static str> {
+    if status == "encrypted" {
+        Some("Файл защищён паролем — найден только по имени")
+    } else if status.starts_with("skipped: скан") {
+        Some("Скан без текстового слоя — найден только по имени")
+    } else {
+        None
+    }
+}
+
 /// Одна карточка результата. Возвращает её прямоугольник.
+#[allow(clippy::too_many_arguments)]
 fn hit_row(
     ui: &mut Ui,
     index: usize,
     hit: &Hit,
     selected: bool,
+    with_buttons: bool,
     pal: &Palette,
     dark: bool,
     actions: &mut Vec<Action>,
@@ -310,62 +427,70 @@ fn hit_row(
     // Фон рисуем после содержимого (когда известно, наведён ли курсор), поэтому резервируем место в списке фигур.
     let background = ui.painter().add(Shape::Noop);
     let inner = ui.scope_builder(UiBuilder::new().id_salt(&hit.path).sense(Sense::click()), |ui| {
-        Frame::new().inner_margin(Margin::symmetric(14, 10)).show(ui, |ui| {
+        Frame::new().inner_margin(Margin::symmetric(14, 12)).show(ui, |ui| {
             ui.set_width(ui.available_width());
-            ui.horizontal(|ui| {
+            ui.horizontal_top(|ui| {
                 let (color, label) = theme::badge(&hit.ext, dark);
-                badge(ui, &label, color);
-                let meta = RichText::new(format!("{} · {}", format_size(hit.size), format_time(hit.modified_ms)))
-                    .size(12.5)
-                    .color(pal.muted);
-                // Правую часть (размер и дата) резервируем заранее, иначе длинное имя наезжает на неё.
-                let meta_width = ui
-                    .painter()
-                    .layout_no_wrap(meta.text().to_string(), FontId::proportional(12.5), pal.muted)
-                    .size()
-                    .x;
-                let name_width = (ui.available_width() - meta_width - 16.0).max(80.0);
-                ui.scope(|ui| {
-                    ui.set_max_width(name_width);
-                    ui.add(egui::Label::new(RichText::new(&hit.name).strong().size(15.5)).truncate());
-                });
-                ui.with_layout(Layout::right_to_left(Align::Center), |ui| {
-                    ui.label(meta);
-                });
-            });
-            ui.horizontal(|ui| {
-                ui.add(egui::Label::new(RichText::new(&hit.path).size(12.5).color(pal.muted)).truncate());
-            });
-            if hit.status == "encrypted" {
-                ui.label(RichText::new("Файл защищён паролем — найден только по имени").size(12.5).color(pal.warn));
-            }
-            if let Some(snippet) = &hit.snippet {
-                ui.add_space(2.0);
-                ui.horizontal_top(|ui| {
-                    if let Some(location) = &hit.location {
-                        chip(ui, location, pal.ok, pal.line);
+                file_tile(ui, &label, color, 42.0);
+                ui.vertical(|ui| {
+                    ui.spacing_mut().item_spacing.y = 3.0;
+                    ui.horizontal(|ui| {
+                        let meta =
+                            RichText::new(format!("{} · {}", format_size(hit.size), format_time(hit.modified_ms)))
+                                .size(12.5)
+                                .color(pal.muted);
+                        // Правую часть (размер и дата) резервируем заранее, иначе длинное имя наезжает на неё.
+                        let meta_width = ui
+                            .painter()
+                            .layout_no_wrap(meta.text().to_string(), FontId::proportional(12.5), pal.muted)
+                            .size()
+                            .x;
+                        let name_width = (ui.available_width() - meta_width - 16.0).max(80.0);
+                        ui.scope(|ui| {
+                            ui.set_max_width(name_width);
+                            ui.add(egui::Label::new(RichText::new(&hit.name).strong().size(15.5)).truncate());
+                        });
+                        ui.with_layout(Layout::right_to_left(Align::Center), |ui| {
+                            ui.label(meta);
+                        });
+                    });
+                    ui.add(
+                        egui::Label::new(RichText::new(parent_of(&hit.path)).size(12.5).color(pal.muted)).truncate(),
+                    );
+                    if let Some(note) = status_note(&hit.status) {
+                        ui.label(RichText::new(note).size(12.5).color(pal.warn));
                     }
-                    let text_color = ui.visuals().text_color();
-                    let width = ui.available_width();
-                    ui.add(egui::Label::new(snippet_job(snippet, pal, text_color, width)).wrap());
+                    if let Some(snippet) = &hit.snippet {
+                        ui.add_space(3.0);
+                        ui.horizontal_top(|ui| {
+                            if let Some(location) = &hit.location {
+                                chip(ui, location, pal.ok, pal.line);
+                            }
+                            let text_color = ui.visuals().text_color();
+                            let width = ui.available_width();
+                            ui.add(egui::Label::new(snippet_job(snippet, pal, text_color, width)).wrap());
+                        });
+                    }
+                    if with_buttons && selected {
+                        ui.add_space(4.0);
+                        ui.horizontal(|ui| {
+                            let openable = is_safe_to_open(std::path::Path::new(&hit.path));
+                            if ui
+                                .add_enabled(openable, egui::Button::new("Открыть").small())
+                                .on_disabled_hover_text("Исполняемые файлы не запускаются отсюда")
+                                .clicked()
+                            {
+                                actions.push(Action::Open(index));
+                            }
+                            if ui.add(egui::Button::new("В папке").small()).clicked() {
+                                actions.push(Action::Reveal(index));
+                            }
+                            if ui.add(egui::Button::new("Копировать путь").small()).clicked() {
+                                actions.push(Action::CopyPath(index));
+                            }
+                        });
+                    }
                 });
-            }
-            ui.add_space(2.0);
-            ui.horizontal(|ui| {
-                let openable = is_safe_to_open(std::path::Path::new(&hit.path));
-                if ui
-                    .add_enabled(openable, egui::Button::new("Открыть").small())
-                    .on_disabled_hover_text("Исполняемые файлы не запускаются отсюда")
-                    .clicked()
-                {
-                    actions.push(Action::Open(index));
-                }
-                if ui.add(egui::Button::new("В папке").small()).clicked() {
-                    actions.push(Action::Reveal(index));
-                }
-                if ui.add(egui::Button::new("Копировать путь").small()).clicked() {
-                    actions.push(Action::CopyPath(index));
-                }
             });
         });
     });
@@ -380,8 +505,8 @@ fn hit_row(
         pal.card
     };
     let stroke = Stroke::new(if selected { 1.5 } else { 1.0 }, if selected { pal.accent } else { pal.line });
-    ui.painter().set(background, Shape::rect_filled(rect, 9.0, fill));
-    ui.painter().rect_stroke(rect, 9.0, stroke, StrokeKind::Inside);
+    ui.painter().set(background, Shape::rect_filled(rect, 10.0, fill));
+    ui.painter().rect_stroke(rect, 10.0, stroke, StrokeKind::Inside);
 
     if response.double_clicked() {
         actions.push(Action::Open(index));
@@ -413,6 +538,74 @@ fn hit_row(
         }
     });
     rect
+}
+
+/// Панель справа: подробности о выбранном файле и все действия над ним.
+fn details_panel(ui: &mut Ui, app: &mut App, pal: &Palette, dark: bool, actions: &mut Vec<Action>) {
+    let Some(index) = app.selected else { return };
+    let Some(hit) = app.results.get(index).cloned() else { return };
+    egui::ScrollArea::vertical().auto_shrink([false, false]).show(ui, |ui| {
+        ui.horizontal_top(|ui| {
+            let (color, label) = theme::badge(&hit.ext, dark);
+            file_tile(ui, &label, color, 52.0);
+            ui.vertical(|ui| {
+                ui.add(egui::Label::new(RichText::new(&hit.name).strong().size(16.5)).wrap());
+            });
+        });
+        ui.add_space(12.0);
+        let fact = |ui: &mut Ui, title: &str, value: String| {
+            ui.label(RichText::new(title).size(11.5).color(pal.muted));
+            ui.add(egui::Label::new(RichText::new(value).size(13.5)).wrap());
+            ui.add_space(5.0);
+        };
+        fact(ui, "Папка", parent_of(&hit.path));
+        fact(ui, "Размер", format_size(hit.size));
+        fact(ui, "Изменён", format_time(hit.modified_ms));
+        if let Some(location) = &hit.location {
+            fact(ui, "Найдено", location.clone());
+        }
+        if let Some(note) = status_note(&hit.status) {
+            ui.label(RichText::new(note).size(12.5).color(pal.warn));
+            ui.add_space(5.0);
+        }
+        if let Some(snippet) = &hit.snippet {
+            ui.label(RichText::new("Фрагмент").size(11.5).color(pal.muted));
+            Frame::new().fill(ui.visuals().extreme_bg_color).corner_radius(9.0).inner_margin(Margin::same(10)).show(
+                ui,
+                |ui| {
+                    let text_color = ui.visuals().text_color();
+                    let width = ui.available_width();
+                    ui.add(egui::Label::new(snippet_job(snippet, pal, text_color, width)).wrap());
+                },
+            );
+            ui.add_space(8.0);
+        }
+        let width = ui.available_width();
+        let openable = is_safe_to_open(std::path::Path::new(&hit.path));
+        let on_accent = if dark { Color32::from_rgb(0x0b, 0x14, 0x2b) } else { Color32::WHITE };
+        if ui
+            .add_enabled(
+                openable,
+                egui::Button::new(RichText::new("Открыть").strong().color(on_accent))
+                    .fill(pal.accent)
+                    .corner_radius(10.0)
+                    .min_size(vec2(width, 34.0)),
+            )
+            .on_disabled_hover_text("Исполняемые файлы не запускаются отсюда")
+            .clicked()
+        {
+            actions.push(Action::Open(index));
+        }
+        for (text, action) in [
+            ("Показать в папке", Action::Reveal(index)),
+            ("Копировать путь", Action::CopyPath(index)),
+            ("Искать только в этой папке", Action::SearchInFolder(index)),
+        ] {
+            if ui.add(egui::Button::new(text).corner_radius(10.0).min_size(vec2(width, 30.0))).clicked() {
+                actions.push(action);
+            }
+        }
+    });
 }
 
 // ------------------------------------------------------------------ пустые состояния

@@ -65,6 +65,18 @@ impl fmt::Display for NotText {
 
 impl std::error::Error for NotText {}
 
+/// PDF — скан: страницы состоят из картинок, текстового слоя нет. Индексируется только имя файла.
+#[derive(Debug)]
+pub struct NoTextLayer;
+
+impl fmt::Display for NoTextLayer {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        f.write_str("скан без текстового слоя")
+    }
+}
+
+impl std::error::Error for NoTextLayer {}
+
 #[derive(Debug, Clone)]
 pub struct Limits {
     /// Максимум текста, который берём из одного файла.
@@ -258,6 +270,7 @@ pub fn extract_file(path: &Path, size: u64, limits: &Limits) -> Extracted {
         None => {}
         Some(e) if e.downcast_ref::<Encrypted>().is_some() => extracted.status = Status::Encrypted,
         Some(e) if e.downcast_ref::<NotText>().is_some() => extracted.status = Status::Skipped(e.to_string()),
+        Some(e) if e.downcast_ref::<NoTextLayer>().is_some() => extracted.status = Status::Skipped(e.to_string()),
         Some(e) => extracted.status = Status::Failed(format!("{e:#}")),
     }
     extracted

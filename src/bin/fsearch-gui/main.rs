@@ -93,7 +93,7 @@ fn window_icon() -> Option<Arc<egui::IconData>> {
 fn native_options(mode: Mode) -> eframe::NativeOptions {
     let mut viewport = egui::ViewportBuilder::default()
         .with_title(TITLE)
-        .with_inner_size([960.0, 640.0])
+        .with_inner_size([1040.0, 680.0])
         .with_min_inner_size([560.0, 420.0]);
     if let Some(icon) = window_icon() {
         viewport = viewport.with_icon(icon);

@@ -161,6 +161,11 @@ enum Msg {
 pub enum Reply {
     Search(SearchResponse),
     Count(u64),
+    /// Сколько файлов найдено в каждой группе типов (по порядку `theme::GROUPS`) для запроса с номером `id`.
+    Facets {
+        id: u64,
+        counts: Vec<usize>,
+    },
 }
 
 fn search_worker(dir: PathBuf, rx: Receiver<Msg>, tx: Sender<Reply>, ctx: egui::Context) {
@@ -196,7 +201,25 @@ fn search_worker(dir: PathBuf, rx: Receiver<Msg>, tx: Sender<Reply>, ctx: egui::
                 Some(s) => s.search(&req.opts).map_err(|e| format!("{e:#}")),
                 None => Err(format!("Индекс недоступен: {open_error}")),
             };
+            let found = result.is_ok();
             let _ = tx.send(Reply::Search(SearchResponse { id: req.id, append: req.append, result }));
+            // Счётчики по типам считаются отдельно и параллельно, чтобы не задерживать сам список.
+            if found
+                && !req.append
+                && let Some(s) = searcher.clone()
+            {
+                let (tx, ctx, opts, id) = (tx.clone(), ctx.clone(), req.opts.clone(), req.id);
+                rayon::spawn(move || {
+                    let groups: Vec<Vec<String>> = crate::theme::GROUPS
+                        .iter()
+                        .map(|(_, exts)| exts.iter().map(|e| e.to_string()).collect())
+                        .collect();
+                    if let Ok(counts) = s.count_groups(&opts, &groups) {
+                        let _ = tx.send(Reply::Facets { id, counts });
+                        ctx.request_repaint();
+                    }
+                });
+            }
         }
         ctx.request_repaint();
     }

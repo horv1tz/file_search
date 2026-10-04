@@ -489,3 +489,19 @@ fn contains_path_only_knows_indexed_files() {
     assert!(!s.contains_path("/etc/passwd"));
     assert!(!s.contains_path(&env.root().join("Договоры").to_string_lossy()));
 }
+
+#[test]
+fn group_counts_are_computed_in_parallel_and_match_plain_searches() {
+    let env = Env::new();
+    env.index();
+    let searcher = Searcher::open(env.index.path(), false).unwrap();
+    let groups: Vec<Vec<String>> = [&["docx", "doc"][..], &["xlsx", "xls"], &["pdf"], &["zzz"]]
+        .iter()
+        .map(|g| g.iter().map(|e| e.to_string()).collect())
+        .collect();
+    let opts = SearchOptions { query: "Кракозябровая".into(), ..SearchOptions::default() };
+    assert_eq!(searcher.count_groups(&opts, &groups).unwrap(), [2, 0, 1, 0]);
+    // Без запроса считаются все файлы группы.
+    let all = SearchOptions::default();
+    assert_eq!(searcher.count_groups(&all, &groups).unwrap(), [2, 2, 1, 0]);
+}

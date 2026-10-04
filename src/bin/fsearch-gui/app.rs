@@ -118,6 +118,10 @@ pub struct App {
     /// Повторный запрос из-за обновления индекса: список не должен «прыгать» наверх.
     silent_refresh: bool,
     pub selected: Option<usize>,
+    /// Сколько файлов в каждой группе типов (по порядку `theme::GROUPS`) для текущего запроса.
+    pub facets: Option<Vec<usize>>,
+    /// Справа сейчас показана панель подробностей (карточки тогда не дублируют кнопки).
+    pub details_visible: bool,
     pub scroll_to_selected: bool,
     pub scroll_to_top: bool,
     last_generation: u64,
@@ -247,6 +251,8 @@ impl App {
             dirty_at: (!launch.query.is_empty()).then(Instant::now),
             silent_refresh: false,
             selected: None,
+            facets: None,
+            details_visible: false,
             scroll_to_selected: false,
             scroll_to_top: false,
             last_generation: 0,
@@ -360,6 +366,7 @@ impl App {
             self.searching = false;
             self.search_error = None;
             self.selected = None;
+            self.facets = None;
             self.current_id = self.next_id + 1;
             self.next_id += 1;
             return;
@@ -428,6 +435,11 @@ impl App {
         while let Ok(reply) = backend.replies.try_recv() {
             match reply {
                 Reply::Count(n) => self.num_docs = n,
+                Reply::Facets { id, counts } => {
+                    if id == self.current_id {
+                        self.facets = Some(counts);
+                    }
+                }
                 Reply::Search(resp) => {
                     if resp.id != self.current_id {
                         continue;
@@ -449,7 +461,8 @@ impl App {
                                 if self.silent_refresh {
                                     self.selected = self.selected.filter(|i| *i < self.results.len());
                                 } else {
-                                    self.selected = None;
+                                    // Первый результат выбран сразу: Enter открывает его, справа видны подробности.
+                                    self.selected = if self.results.is_empty() { None } else { Some(0) };
                                     self.scroll_to_top = true;
                                 }
                                 self.silent_refresh = false;
