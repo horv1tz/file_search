@@ -118,6 +118,8 @@ pub struct App {
     /// Повторный запрос из-за обновления индекса: список не должен «прыгать» наверх.
     silent_refresh: bool,
     pub selected: Option<usize>,
+    /// Просмотр содержимого выбранного текстового файла.
+    pub preview: Option<crate::preview::Preview>,
     /// Сколько файлов в каждой группе типов (по порядку `theme::GROUPS`) для текущего запроса.
     pub facets: Option<Vec<usize>>,
     /// Справа сейчас показана панель подробностей (карточки тогда не дублируют кнопки).
@@ -252,6 +254,7 @@ impl App {
             dirty_at: (!launch.query.is_empty()).then(Instant::now),
             silent_refresh: false,
             selected: None,
+            preview: None,
             facets: None,
             details_visible: false,
             scroll_to_selected: false,
@@ -535,6 +538,25 @@ impl App {
                 ctx.request_repaint();
             }
         });
+    }
+
+    /// Выбранный результат можно показать как текст (обычный текстовый файл).
+    pub fn selected_is_text(&self) -> bool {
+        self.selected.and_then(|i| self.results.get(i)).is_some_and(|hit| file_search::extract::is_text_ext(&hit.ext))
+    }
+
+    /// Держит просмотр в соответствии с выбранным файлом и текущим запросом.
+    pub fn sync_preview(&mut self, ctx: &Context) {
+        let wanted = if self.selected_is_text() {
+            self.selected.and_then(|i| self.results.get(i)).map(|hit| PathBuf::from(&hit.path))
+        } else {
+            None
+        };
+        match (wanted, &mut self.preview) {
+            (None, _) => self.preview = None,
+            (Some(path), Some(p)) if p.path() == path => p.set_query(&self.form.query),
+            (Some(path), _) => self.preview = Some(crate::preview::Preview::open(ctx, path, &self.form.query)),
+        }
     }
 
     pub fn handle_action(&mut self, ctx: &Context, action: Action) {

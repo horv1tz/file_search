@@ -219,6 +219,11 @@ fn classify(ext: &str) -> Kind {
     }
 }
 
+/// Обычный текстовый файл (по расширению): его можно показать целиком, как в редакторе.
+pub fn is_text_ext(ext: &str) -> bool {
+    matches!(classify(&ext.to_lowercase()), Kind::Text)
+}
+
 fn read_head(path: &Path, n: usize) -> std::io::Result<Vec<u8>> {
     let mut buf = Vec::with_capacity(n);
     File::open(path)?.take(n as u64).read_to_end(&mut buf)?;

@@ -1767,7 +1767,7 @@ dependencies = [
 
 [[package]]
 name = "file_search"
-version = "0.1.4"
+version = "0.1.5"
 dependencies = [
  "anyhow",
  "calamine",

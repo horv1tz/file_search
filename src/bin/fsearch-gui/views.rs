@@ -18,6 +18,8 @@ use crate::theme::{self, GROUPS, Palette};
 /// Ширина окна, начиная с которой справа показывается панель подробностей о выбранном файле.
 const DETAILS_MIN_WIDTH: f32 = 900.0;
 const DETAILS_WIDTH: f32 = 290.0;
+/// Начальная ширина панели, когда в ней показан текст файла.
+const PREVIEW_WIDTH: f32 = 520.0;
 
 pub fn draw(ctx: &Context, app: &mut App, actions: &mut Vec<Action>) {
     let dark = ctx.style().visuals.dark_mode;
@@ -37,9 +39,20 @@ pub fn draw(ctx: &Context, app: &mut App, actions: &mut Vec<Action>) {
         && app.selected.is_some_and(|i| i < app.results.len());
     app.details_visible = details;
     if details {
-        egui::SidePanel::right("details")
-            .exact_width(DETAILS_WIDTH)
-            .resizable(false)
+        app.sync_preview(ctx);
+    } else {
+        app.preview = None;
+    }
+    if details {
+        // Для текстового файла панель шире и растягивается: в ней виден сам текст.
+        let panel = egui::SidePanel::right("details");
+        let panel = if app.preview.is_some() {
+            let max = (ctx.content_rect().width() * 0.7).max(DETAILS_WIDTH);
+            panel.default_width(PREVIEW_WIDTH.min(max)).width_range(DETAILS_WIDTH..=max).resizable(true)
+        } else {
+            panel.exact_width(DETAILS_WIDTH).resizable(false)
+        };
+        panel
             .frame(Frame::new().fill(pal.card).stroke(Stroke::new(1.0, pal.line)).inner_margin(Margin {
                 left: 16,
                 right: 16,
@@ -544,6 +557,9 @@ fn hit_row(
 fn details_panel(ui: &mut Ui, app: &mut App, pal: &Palette, dark: bool, actions: &mut Vec<Action>) {
     let Some(index) = app.selected else { return };
     let Some(hit) = app.results.get(index).cloned() else { return };
+    if app.preview.is_some() {
+        return text_details(ui, app, &hit, index, pal, dark, actions);
+    }
     egui::ScrollArea::vertical().auto_shrink([false, false]).show(ui, |ui| {
         ui.horizontal_top(|ui| {
             let (color, label) = theme::badge(&hit.ext, dark);
@@ -606,6 +622,65 @@ fn details_panel(ui: &mut Ui, app: &mut App, pal: &Palette, dark: bool, actions:
             }
         }
     });
+}
+
+/// Панель для текстового файла: коротко о файле, кнопки и под ними сам текст, как в редакторе.
+fn text_details(
+    ui: &mut Ui,
+    app: &mut App,
+    hit: &Hit,
+    index: usize,
+    pal: &Palette,
+    dark: bool,
+    actions: &mut Vec<Action>,
+) {
+    ui.horizontal_top(|ui| {
+        let (color, label) = theme::badge(&hit.ext, dark);
+        file_tile(ui, &label, color, 40.0);
+        ui.vertical(|ui| {
+            ui.add(egui::Label::new(RichText::new(&hit.name).strong().size(15.5)).truncate());
+            ui.add(
+                egui::Label::new(
+                    RichText::new(format!("{} · {}", format_size(hit.size), format_time(hit.modified_ms)))
+                        .size(12.0)
+                        .color(pal.muted),
+                )
+                .truncate(),
+            );
+            ui.add(egui::Label::new(RichText::new(parent_of(&hit.path)).size(12.0).color(pal.muted)).truncate())
+                .on_hover_text(&hit.path);
+        });
+    });
+    ui.add_space(8.0);
+    let on_accent = if dark { Color32::from_rgb(0x0b, 0x14, 0x2b) } else { Color32::WHITE };
+    ui.horizontal_wrapped(|ui| {
+        if ui
+            .add_enabled(
+                is_safe_to_open(std::path::Path::new(&hit.path)),
+                egui::Button::new(RichText::new("Открыть").strong().color(on_accent))
+                    .fill(pal.accent)
+                    .corner_radius(8.0),
+            )
+            .on_hover_text("Открыть в программе по умолчанию (для редактирования)")
+            .on_disabled_hover_text("Исполняемые файлы не запускаются отсюда")
+            .clicked()
+        {
+            actions.push(Action::Open(index));
+        }
+        for (text, action) in [
+            ("В папке", Action::Reveal(index)),
+            ("Копировать путь", Action::CopyPath(index)),
+            ("Искать в этой папке", Action::SearchInFolder(index)),
+        ] {
+            if ui.add(egui::Button::new(text).corner_radius(8.0)).clicked() {
+                actions.push(action);
+            }
+        }
+    });
+    ui.add_space(6.0);
+    if let Some(preview) = &mut app.preview {
+        preview.show(ui, pal, dark);
+    }
 }
 
 // ------------------------------------------------------------------ пустые состояния

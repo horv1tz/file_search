@@ -6,6 +6,7 @@
 
 mod app;
 mod backend;
+mod preview;
 mod settings;
 mod settings_ui;
 mod theme;

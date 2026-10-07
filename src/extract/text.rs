@@ -18,6 +18,17 @@ pub fn read_prefix(path: &Path, max: usize) -> std::io::Result<(Vec<u8>, bool)> 
     Ok((buf, truncated))
 }
 
+/// Текст файла для просмотра: не более `max` байт, кодировка определяется сама, переводы строк приводятся к `\n`.
+/// Второй элемент — файл показан не целиком. Ошибка — файл не удалось прочитать или он не текстовый.
+pub fn read_for_view(path: &Path, max: usize) -> std::io::Result<(String, bool)> {
+    let (bytes, truncated) = read_prefix(path, max)?;
+    if looks_binary(&bytes[..bytes.len().min(8192)]) {
+        return Err(std::io::Error::new(std::io::ErrorKind::InvalidData, "это не текстовый файл"));
+    }
+    let text = decode_bytes(&bytes).replace("\r\n", "\n").replace('\r', "\n");
+    Ok((text, truncated))
+}
+
 fn utf16_without_bom(sample: &[u8]) -> Option<&'static encoding_rs::Encoding> {
     let sample = &sample[..sample.len().min(4096) & !1];
     if sample.len() < 4 {
@@ -202,6 +213,23 @@ pub fn strip_html(s: &str) -> String {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn view_decodes_and_normalizes_lines() {
+        let dir = std::env::temp_dir().join(format!("fsearch-view-{}", std::process::id()));
+        std::fs::create_dir_all(&dir).unwrap();
+        let (bytes, _, _) = encoding_rs::WINDOWS_1251.encode("первая строка\r\nвторая строка\rтретья строка");
+        let file = dir.join("a.txt");
+        std::fs::write(&file, &bytes).unwrap();
+        let (text, cut) = read_for_view(&file, 1 << 20).unwrap();
+        assert_eq!(text, "первая строка\nвторая строка\nтретья строка");
+        assert!(!cut);
+        let (head, cut) = read_for_view(&file, 8).unwrap();
+        assert!(cut && !head.is_empty());
+        std::fs::write(&file, [0u8, 1, 2, 3, 0, 0, 0, 7]).unwrap();
+        assert!(read_for_view(&file, 1 << 20).is_err());
+        std::fs::remove_dir_all(&dir).ok();
+    }
 
     #[test]
     fn detects_cp1251() {
