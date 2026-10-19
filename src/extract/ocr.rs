@@ -26,6 +26,10 @@ pub type Recognizer<'a> = dyn Fn(&Frame) -> Result<String> + 'a;
 #[derive(Debug, Clone)]
 pub struct EngineInfo {
     pub available: bool,
+    /// Язык, которым программа читает сканы (как его называет система); пусто, если распознавания нет.
+    pub language: String,
+    /// Этот язык — русский. Иначе кириллица читается с множеством ошибок: движок другого языка не знает её букв.
+    pub russian: bool,
     /// Языки, для которых в системе есть распознавание (по-русски, как их называет система).
     pub languages: Vec<String>,
     /// Пояснение для пользователя: что делать, если распознавание недоступно.
@@ -40,6 +44,12 @@ pub fn engine_info() -> &'static EngineInfo {
 
 pub fn available() -> bool {
     engine_info().available
+}
+
+/// Наибольшая сторона картинки, которую принимает распознавание, в пикселях.
+pub fn max_dimension() -> u32 {
+    static MAX: OnceLock<u32> = OnceLock::new();
+    *MAX.get_or_init(backend::max_dimension)
 }
 
 /// Сколько страниц распознаётся одновременно: распознавание занимает процессор, а страницы ещё и отрисовываются.
@@ -149,15 +159,38 @@ mod backend {
         let languages: Vec<String> = OcrEngine::AvailableRecognizerLanguages()
             .map(|list| list.into_iter().filter_map(|l| l.DisplayName().ok()).map(|n| n.to_string()).collect())
             .unwrap_or_default();
-        let available = create_engine().is_ok();
-        let note = if available {
-            String::new()
-        } else {
+        let engine = create_engine().ok();
+        let available = engine.is_some();
+        let (language, russian) = engine
+            .as_ref()
+            .and_then(|e| e.RecognizerLanguage().ok())
+            .map(|l| {
+                let tag = l.LanguageTag().map(|t| t.to_string()).unwrap_or_default();
+                (
+                    l.DisplayName().map(|n| n.to_string()).unwrap_or_else(|_| tag.clone()),
+                    tag.to_lowercase().starts_with("ru"),
+                )
+            })
+            .unwrap_or_default();
+        let note = if !available {
             "В Windows не установлен язык распознавания текста. Добавьте русский язык: Параметры → Время и язык → \
              Язык и регион → Добавить язык (достаточно компонента «Распознавание текста»), затем перезапустите программу."
                 .to_string()
+        } else if !russian {
+            format!(
+                "Русский язык распознавания не установлен: сейчас сканы читаются как «{language}», и русский текст будет \
+                 с множеством ошибок. Добавьте русский язык: Параметры → Время и язык → Язык и регион → Добавить язык \
+                 (достаточно компонента «Распознавание текста»), затем перезапустите программу."
+            )
+        } else {
+            String::new()
         };
-        EngineInfo { available, languages, note }
+        EngineInfo { available, language, russian, languages, note }
+    }
+
+    pub fn max_dimension() -> u32 {
+        init_apartment();
+        OcrEngine::MaxImageDimension().unwrap_or(2600)
     }
 
     pub fn recognize(frame: &Frame) -> Result<String> {
@@ -211,9 +244,15 @@ mod backend {
     pub fn info() -> EngineInfo {
         EngineInfo {
             available: false,
+            language: String::new(),
+            russian: false,
             languages: Vec::new(),
             note: "Распознавание текста на сканах пока работает только в Windows.".to_string(),
         }
+    }
+
+    pub fn max_dimension() -> u32 {
+        2600
     }
 
     pub fn recognize(_frame: &Frame) -> Result<String> {

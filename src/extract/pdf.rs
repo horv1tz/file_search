@@ -45,9 +45,10 @@ fn primary(path: &Path) -> Result<Vec<String>, String> {
 
 /// Страница, на которой букв меньше, считается «без текста» и отдаётся на распознавание.
 const THIN_PAGE_LETTERS: usize = 20;
-/// Картинка страницы для распознавания: длинная сторона в пикселях (около 190 dpi для листа A4 — для печатного
-/// текста этого достаточно, а на более крупной картинке распознавание заметно медленнее).
-const OCR_TARGET_PX: f32 = 2200.0;
+/// Картинка страницы для распознавания: длинная сторона в пикселях (около 280 dpi для листа A4 — столько же, сколько
+/// у обычного скана: на меньшем разрешении мелкие буквы сливаются, и ошибок становится много). Не больше, чем
+/// принимает распознавание.
+const OCR_TARGET_PX: f32 = 3300.0;
 /// Дольше этого один файл не распознаётся: остальные страницы пропускаются.
 const OCR_MAX_SECONDS: u64 = 180;
 
@@ -188,7 +189,8 @@ fn render_page<'a>(
     if !(w > 1.0 && h > 1.0) {
         return None;
     }
-    let scale = (OCR_TARGET_PX / w.max(h)).clamp(0.5, 4.0);
+    let target = OCR_TARGET_PX.min(ocr::max_dimension().saturating_sub(40) as f32);
+    let scale = (target / w.max(h)).clamp(0.5, 5.0);
     let settings = hayro::PixmapSettings {
         x_scale: scale,
         y_scale: scale,

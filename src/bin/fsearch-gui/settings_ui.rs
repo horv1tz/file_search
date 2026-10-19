@@ -256,18 +256,17 @@ fn ocr_setting(ui: &mut Ui, app: &mut App, pal: &Palette) {
         ui.checkbox(&mut app.settings.ocr, "Распознавать текст на сканах PDF (картинках вместо текста)")
             .on_hover_text("Медленно: страница занимает около секунды, поэтому первая индексация сканов дольше. Файлы со сканами находятся и без этого, но только по имени.");
     });
-    if info.available {
-        let languages = if info.languages.is_empty() {
-            String::new()
-        } else {
-            format!(" Языки: {}.", info.languages.join(", "))
-        };
+    if info.available && info.russian {
         ui.label(
-            RichText::new(format!("Распознавание доступно.{languages} Применится при следующем обновлении индекса."))
-                .size(12.5)
-                .color(pal.muted),
+            RichText::new(format!(
+                "Распознавание доступно, язык: {}. Применится при следующем обновлении индекса.",
+                info.language
+            ))
+            .size(12.5)
+            .color(pal.muted),
         );
     } else {
+        // Нет языка или он не русский: в обоих случаях пользователю нужно знать, что делать.
         ui.label(RichText::new(&info.note).size(12.5).color(pal.warn));
     }
 }
