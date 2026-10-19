@@ -149,9 +149,11 @@ struct Candidate {
 
 /// Облачная заглушка: содержимого на диске нет, читать нечего, пока файл не скачают.
 const CLOUD_MARK: u64 = 1 << 62;
-/// Ошибка чтения: младшие 32 бита — время попытки (секунды с 1970 года), следующие 8 — номер попытки.
+/// Ошибка чтения: младшие 32 бита — время попытки (секунды с 1970 года), следующие 8 — номер попытки,
+/// ещё 8 — младший байт версии извлекателя, с которой файл не прочитался (после починки разборщика отсрочка не действует).
 const RETRY_FLAG: u64 = 1 << 61;
 const RETRY_ATTEMPT_SHIFT: u32 = 32;
+const RETRY_VERSION_SHIFT: u32 = 40;
 /// Первая повторная попытка — через 6 часов, дальше вдвое дольше за каждую неудачу, но не реже раза в неделю.
 const RETRY_BASE: u64 = 6 * 3600;
 const RETRY_MAX: u64 = 7 * 24 * 3600;
@@ -161,8 +163,16 @@ fn now_secs() -> u64 {
 }
 
 /// Отметка «не удалось прочитать» для записи: `attempt` — номер этой попытки (с 1).
-fn retry_mark(attempt: u64, now: u64) -> u64 {
-    RETRY_FLAG | (attempt.min(255) << RETRY_ATTEMPT_SHIFT) | (now & 0xFFFF_FFFF)
+fn retry_mark(attempt: u64, now: u64, extractor_version: u64) -> u64 {
+    RETRY_FLAG
+        | ((extractor_version & 0xFF) << RETRY_VERSION_SHIFT)
+        | (attempt.min(255) << RETRY_ATTEMPT_SHIFT)
+        | (now & 0xFFFF_FFFF)
+}
+
+/// С какой версией извлекателя (младший байт) файл не прочитался.
+fn retry_version(ver: u64) -> u64 {
+    (ver >> RETRY_VERSION_SHIFT) & 0xFF
 }
 
 fn is_retry_mark(ver: u64) -> bool {
@@ -187,7 +197,7 @@ fn version_mark(c: &Candidate, ex: &Extracted) -> u64 {
     if c.cloud {
         CLOUD_MARK
     } else if matches!(ex.status, Status::Failed(_)) {
-        retry_mark(retry_attempts(c.prev_ver) + 1, now_secs())
+        retry_mark(retry_attempts(c.prev_ver) + 1, now_secs(), version_for(extension_of(&c.path)))
     } else {
         version_for(extension_of(&c.path))
     }
@@ -214,7 +224,14 @@ fn freshness(stored_ver: u64, c: &Candidate, now: u64, retry_base: u64) -> Fresh
     } else if stored_ver == CLOUD_MARK {
         if c.cloud { Freshness::Fresh } else { Freshness::Stale }
     } else if is_retry_mark(stored_ver) {
-        if now < retry_due(stored_ver, retry_base) { Freshness::Deferred } else { Freshness::Stale }
+        // Разборщик с тех пор поменяли — пробуем сразу, а не ждём конца отсрочки.
+        if retry_version(stored_ver) != version_for(extension_of(&c.path)) & 0xFF
+            || now >= retry_due(stored_ver, retry_base)
+        {
+            Freshness::Stale
+        } else {
+            Freshness::Deferred
+        }
     } else {
         Freshness::Stale
     }
@@ -832,12 +849,14 @@ mod tests {
     #[test]
     fn retries_back_off_and_are_capped() {
         let t = 1_700_000_000;
-        assert_eq!(retry_due(retry_mark(1, t), RETRY_BASE), t + RETRY_BASE);
-        assert_eq!(retry_due(retry_mark(2, t), RETRY_BASE), t + 2 * RETRY_BASE);
-        assert_eq!(retry_due(retry_mark(3, t), RETRY_BASE), t + 4 * RETRY_BASE);
-        assert_eq!(retry_due(retry_mark(40, t), RETRY_BASE), t + RETRY_MAX);
-        assert_eq!(retry_due(retry_mark(300, t), RETRY_BASE), t + RETRY_MAX, "номер попытки не переполняет поле");
-        assert_eq!(retry_due(retry_mark(1, t), 0), t, "нулевая отсрочка — повтор сразу");
+        assert_eq!(retry_due(retry_mark(1, t, 1), RETRY_BASE), t + RETRY_BASE);
+        assert_eq!(retry_due(retry_mark(2, t, 1), RETRY_BASE), t + 2 * RETRY_BASE);
+        assert_eq!(retry_due(retry_mark(3, t, 1), RETRY_BASE), t + 4 * RETRY_BASE);
+        assert_eq!(retry_due(retry_mark(40, t, 1), RETRY_BASE), t + RETRY_MAX);
+        assert_eq!(retry_due(retry_mark(300, t, 1), RETRY_BASE), t + RETRY_MAX, "номер попытки не переполняет поле");
+        assert_eq!(retry_due(retry_mark(1, t, 1), 0), t, "нулевая отсрочка — повтор сразу");
+        assert_eq!(retry_due(retry_mark(1, t, 0xABCD), 0), t, "версия не портит время");
+        assert_eq!(retry_attempts(retry_mark(7, t, 0xFF)), 7);
     }
 
     #[test]
@@ -856,9 +875,12 @@ mod tests {
         assert_eq!(freshness(CLOUD_MARK, &cand("a.pdf", true, 0), now, b), Freshness::Fresh);
         assert_eq!(freshness(CLOUD_MARK, &local, now, b), Freshness::Stale);
         // Ошибка чтения: до срока — ждём, после — пробуем снова.
-        let mark = retry_mark(1, now - 60);
+        let mark = retry_mark(1, now - 60, version_for("pdf"));
         assert_eq!(freshness(mark, &local, now, b), Freshness::Deferred);
         assert_eq!(freshness(mark, &local, now + b, b), Freshness::Stale);
+        // Разборщик поменяли после неудачи — отсрочка не действует.
+        let old_mark = retry_mark(1, now - 60, version_for("pdf") - 1);
+        assert_eq!(freshness(old_mark, &local, now, b), Freshness::Stale);
     }
 
     #[test]

@@ -5,6 +5,7 @@
 //! Если текста нет совсем, но в файле есть картинки, это скан: честно сообщаем, что искать по такому файлу можно
 //! только по имени.
 
+use std::panic::{AssertUnwindSafe, catch_unwind};
 use std::path::Path;
 
 use anyhow::{Result, anyhow};
@@ -17,15 +18,45 @@ fn is_password_error(message: &str) -> bool {
     lower.contains("password") || lower.contains("encrypt") || lower.contains("decrypt")
 }
 
+/// Меньше стольких букв на страницу в среднем — текст подозрительно скудный (колонтитулы и номера страниц у скана,
+/// мусор из шрифта без таблицы символов): стоит попробовать второй разборщик и взять лучший результат.
+const THIN_LETTERS_PER_PAGE: usize = 20;
+/// Меньше стольких букв во всём файле — текста нет (одиночные цифры и знаки текстом не считаются).
+const MIN_LETTERS: usize = 3;
+
+/// Основной разбор. Паника в `pdf-extract` (на редких шрифтах) не должна лишать файл запасного разбора.
+fn primary(path: &Path) -> Result<Vec<String>, String> {
+    match catch_unwind(AssertUnwindSafe(|| pdf_extract::extract_text_by_pages(path))) {
+        Ok(Ok(pages)) => Ok(pages),
+        Ok(Err(e)) => Err(e.to_string()),
+        Err(panic) => {
+            let msg = panic
+                .downcast_ref::<&str>()
+                .map(|s| s.to_string())
+                .or_else(|| panic.downcast_ref::<String>().cloned())
+                .unwrap_or_else(|| "неизвестная причина".into());
+            Err(format!("паника в основном разборщике: {msg}"))
+        }
+    }
+}
+
 pub fn extract(path: &Path, out: &mut Doc) -> Result<()> {
-    let primary = pdf_extract::extract_text_by_pages(path).map_err(|e| e.to_string());
-    let pages = match primary {
-        Ok(pages) if has_text(&pages) => pages,
-        Ok(_) => fallback(path)?,
-        Err(msg) if is_password_error(&msg) => return Err(Encrypted.into()),
+    let pages = match primary(path) {
+        Ok(pages) if !is_thin(&pages) => pages,
+        // Текста нет или его слишком мало: второй разборщик иногда читает то, что не прочёл первый.
+        Ok(pages) => match fallback(path) {
+            Ok(second) if letters(&second) > letters(&pages) => second,
+            Err(e) if e.downcast_ref::<Encrypted>().is_some() => return Err(e),
+            _ => pages,
+        },
+        Err(msg) if is_password_error(&msg) => match fallback(path) {
+            // «Пароль» только на права (печать, копирование): файл открывается с пустым паролем.
+            Ok(pages) => pages,
+            Err(_) => return Err(Encrypted.into()),
+        },
         Err(msg) => fallback(path).map_err(|second| anyhow!("{msg}; запасной разбор: {second}"))?,
     };
-    if !has_text(&pages) {
+    if letters(&pages) < MIN_LETTERS {
         return Err(if has_images(path) { NoTextLayer.into() } else { anyhow!("в PDF нет текста") });
     }
     for (i, page) in pages.iter().enumerate() {
@@ -44,18 +75,24 @@ pub fn extract(path: &Path, out: &mut Doc) -> Result<()> {
     Ok(())
 }
 
-fn has_text(pages: &[String]) -> bool {
-    pages.iter().any(|p| p.chars().any(char::is_alphanumeric))
+/// Сколько букв в тексте всех страниц (цифры и знаки не считаются).
+fn letters(pages: &[String]) -> usize {
+    pages.iter().map(|p| p.chars().filter(|c| c.is_alphabetic()).count()).sum()
+}
+
+fn is_thin(pages: &[String]) -> bool {
+    letters(pages) < THIN_LETTERS_PER_PAGE * pages.len().max(1)
 }
 
 /// Запасной разборщик на `lopdf`: страницы читаются по одной, нечитаемая страница не мешает остальным.
 fn fallback(path: &Path) -> Result<Vec<String>> {
-    let doc = lopdf::Document::load(path).map_err(|e| {
+    let mut doc = lopdf::Document::load(path).map_err(|e| {
         let msg = e.to_string();
         if is_password_error(&msg) { anyhow::Error::from(Encrypted) } else { anyhow!("{msg}") }
     })?;
     if doc.is_encrypted() {
-        return Err(Encrypted.into());
+        // Чаще всего пароль стоит только на права (копирование, печать), а читается файл с пустым паролем.
+        doc.decrypt("").map_err(|_| anyhow::Error::from(Encrypted))?;
     }
     let numbers: Vec<u32> = doc.get_pages().keys().copied().collect();
     Ok(numbers.iter().map(|n| doc.extract_text(&[*n]).unwrap_or_default()).collect())
@@ -126,6 +163,48 @@ mod tests {
         let catalog_id = doc.add_object(dictionary! { "Type" => "Catalog", "Pages" => pages_id });
         doc.trailer.set("Root", catalog_id);
         doc.save(path).unwrap();
+    }
+
+    /// PDF с паролем только на права: открывается с пустым паролем, как в любом просмотрщике.
+    fn make_restricted_pdf(path: &Path, text: &str) {
+        use lopdf::encryption::{EncryptionState, EncryptionVersion, Permissions};
+        let plain = path.with_extension("plain.pdf");
+        make_pdf(&plain, Some(text));
+        let mut doc = Document::load(&plain).unwrap();
+        // Для шифрования нужен идентификатор файла.
+        let id = Object::string_literal(b"0123456789abcdef".to_vec());
+        doc.trailer.set("ID", vec![id.clone(), id]);
+        let state = EncryptionState::try_from(EncryptionVersion::V2 {
+            document: &doc,
+            owner_password: "secret-owner",
+            user_password: "",
+            key_length: 128,
+            permissions: Permissions::PRINTABLE,
+        })
+        .unwrap();
+        doc.encrypt(&state).unwrap();
+        doc.save(path).unwrap();
+    }
+
+    #[test]
+    fn restricted_but_openable_pdf_is_read() {
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("restricted.pdf");
+        make_restricted_pdf(&path, "Confidential budget");
+        let e = extract_file(&path, std::fs::metadata(&path).unwrap().len(), &Limits::default());
+        assert_eq!(e.status, Status::Ok, "{e:?}");
+        assert!(e.text.contains("Confidential budget"), "{}", e.text);
+        let mut doc = Document::load(&path).unwrap();
+        assert!(!doc.is_encrypted() || doc.decrypt("").is_ok());
+    }
+
+    #[test]
+    fn thin_text_does_not_hide_a_scan() {
+        // Номер страницы вместо текста — это скан, а не «проиндексированный документ».
+        assert!(is_thin(&["3".to_string()]));
+        assert!(is_thin(&["Стр. 12".to_string()]));
+        assert!(!is_thin(&["Договор аренды нежилого помещения, заключённый между сторонами".to_string()]));
+        assert_eq!(letters(&["Hello, мир 123".to_string()]), 8);
     }
 
     #[test]

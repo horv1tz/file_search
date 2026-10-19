@@ -580,6 +580,8 @@ fn status_note(status: &str) -> Option<&'static str> {
         Some("Файл защищён паролем — найден только по имени")
     } else if status.starts_with("skipped: скан") {
         Some("Скан без текстового слоя — найден только по имени")
+    } else if status == "error" {
+        Some("Не удалось прочитать текст — найден только по имени")
     } else {
         None
     }

@@ -28,7 +28,8 @@ fn kind_version(kind: Kind) -> u64 {
     match kind {
         Kind::Office => 0,
         Kind::Odf => 0,
-        Kind::Pdf => 0,
+        // 1: запасной разбор при панике, PDF с паролем только на права, строже проверка «есть ли текст».
+        Kind::Pdf => 1,
         Kind::Rtf => 0,
         Kind::Html => 0,
         Kind::Text => 0,
