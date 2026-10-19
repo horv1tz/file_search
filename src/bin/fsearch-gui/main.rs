@@ -10,6 +10,7 @@ mod preview;
 mod settings;
 mod settings_ui;
 mod theme;
+mod updater;
 mod views;
 
 use std::fs::{self, File, OpenOptions};
@@ -17,8 +18,8 @@ use std::io::Write;
 use std::net::TcpListener;
 use std::panic::{AssertUnwindSafe, catch_unwind};
 use std::path::PathBuf;
-use std::sync::Arc;
 use std::sync::atomic::{AtomicBool, Ordering};
+use std::sync::{Arc, Mutex};
 use std::time::{Duration, Instant};
 
 use app::{App, Launch};
@@ -36,6 +37,44 @@ const EXIT_ALREADY_RUNNING: i32 = 4;
 
 /// Окно уже создано приложением: сбои после этого — не проблема драйвера, запасной рендерер не поможет.
 static APP_CREATED: AtomicBool = AtomicBool::new(false);
+
+/// Программа обновлена: после закрытия окна нужно запустить этот файл вместо себя.
+static RELAUNCH: Mutex<Option<PathBuf>> = Mutex::new(None);
+
+/// Просит после закрытия окна запустить новую версию программы (см. [`relaunch_if_requested`]).
+pub fn request_relaunch(exe: PathBuf) {
+    *RELAUNCH.lock().unwrap() = Some(exe);
+}
+
+/// Запускает новую версию с теми же аргументами. Вызывается, когда замок единственного экземпляра уже отпущен.
+fn relaunch_if_requested() {
+    let Some(exe) = RELAUNCH.lock().unwrap().take() else { return };
+    let args: Vec<String> = std::env::args().skip(1).collect();
+    match std::process::Command::new(&exe).args(args).spawn() {
+        Ok(_) => log_line(&format!("Перезапуск после обновления: {}", exe.display())),
+        Err(e) => {
+            log_line(&format!("Не удалось перезапустить {}: {e}", exe.display()));
+            show_error(&format!(
+                "Новая версия установлена, но запустить её не удалось: {e}\n\nЗапустите программу вручную: {}",
+                exe.display()
+            ));
+        }
+    }
+}
+
+/// Убирает прежний exe, оставшийся после обновления. Прежний процесс может ещё закрываться и держать файл,
+/// поэтому пробуем несколько раз в фоне; не вышло — уберём при следующем запуске.
+fn cleanup_after_update() {
+    file_search::update::remove_stale_download();
+    std::thread::spawn(|| {
+        for _ in 0..20 {
+            if file_search::update::remove_old_binary() {
+                return;
+            }
+            std::thread::sleep(Duration::from_millis(500));
+        }
+    });
+}
 
 /// Как показать окно. Запуск без ключа выбирает способ сам (`choose_mode`); при неудаче открывается поиск в браузере.
 /// Способ можно задать вручную: `--renderer=wgpu`, `--renderer=glow` или `--renderer=browser`.
@@ -216,7 +255,7 @@ fn run_once(mode: Mode, launch: Launch) -> Result<(), String> {
 /// `quiet` — не показывать окно с ошибкой (запасной режим откроется сам).
 fn run_window(mode: Mode, quiet: bool) -> i32 {
     let launch = parse_args();
-    let _lock = match acquire_lock(&launch) {
+    let lock = match acquire_lock(&launch) {
         Lock::Held(f) => Some(f),
         Lock::Unavailable => None,
         Lock::Busy => {
@@ -228,7 +267,12 @@ fn run_window(mode: Mode, quiet: bool) -> i32 {
     let simulated = cfg!(debug_assertions)
         && std::env::var("FSEARCH_GUI_FAIL").is_ok_and(|v| v.split(',').any(|m| m.trim() == mode.name()));
     let outcome = if simulated { Err("симуляция сбоя".to_string()) } else { run_once(mode, launch) };
-    let Err(error) = outcome else { return 0 };
+    // Замок отпускаем до перезапуска: иначе новая версия сочла бы, что программа уже запущена.
+    drop(lock);
+    let Err(error) = outcome else {
+        relaunch_if_requested();
+        return 0;
+    };
 
     log_line(&format!("Окно ({}) не удалось: {error}", mode.name()));
     if APP_CREATED.load(Ordering::SeqCst) {
@@ -374,6 +418,7 @@ fn browser_mode(reason: &str) -> ! {
 
 fn main() {
     install_crash_log();
+    cleanup_after_update();
     match std::env::args().skip(1).find_map(|a| mode_flag(&a)) {
         Some(Mode::Browser) => browser_mode("запрошен режим браузера"),
         Some(mode) => std::process::exit(run_window(mode, false)),

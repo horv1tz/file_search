@@ -9,6 +9,7 @@ use crate::app::{Action, App};
 use crate::settings::Load;
 use crate::settings::Theme;
 use crate::theme::{self, Palette};
+use crate::updater::Phase;
 use crate::views::shorten;
 
 pub fn show(ctx: &Context, app: &mut App, actions: &mut Vec<Action>) {
@@ -32,12 +33,8 @@ pub fn show(ctx: &Context, app: &mut App, actions: &mut Vec<Action>) {
                 advanced_section(ui, app, actions);
                 ui.separator();
                 index_section(ui, app, &pal, actions);
-                ui.add_space(6.0);
-                ui.label(
-                    RichText::new(format!("Поиск файлов · версия {}", env!("CARGO_PKG_VERSION")))
-                        .size(12.5)
-                        .color(pal.muted),
-                );
+                ui.separator();
+                updates_section(ui, app, &pal, actions);
             });
         });
     if !open {
@@ -52,9 +49,20 @@ fn roots_section(ui: &mut Ui, app: &mut App, pal: &Palette, actions: &mut Vec<Ac
     }
     for (i, root) in app.settings.roots.iter().enumerate() {
         ui.horizontal(|ui| {
-            if ui.small_button("×").on_hover_text("Убрать из поиска и удалить из индекса").clicked()
+            if app.confirm_remove == Some(i) {
+                ui.label(RichText::new("Убрать из поиска?").color(pal.warn));
+                if ui.button("Убрать").clicked() {
+                    actions.push(Action::RemoveRoot(i));
+                }
+                if ui.button("Отмена").clicked() {
+                    actions.push(Action::CancelRemoveRoot);
+                }
+            } else if ui
+                .add(egui::Button::new(RichText::new("×").size(15.0)).min_size(egui::vec2(26.0, 24.0)))
+                .on_hover_text("Убрать из поиска и удалить из индекса")
+                .clicked()
             {
-                actions.push(Action::RemoveRoot(i));
+                actions.push(Action::ConfirmRemoveRoot(i));
             }
             ui.label(root.display().to_string());
             if file_search::netpath::is_network_path(root) {
@@ -80,9 +88,9 @@ fn roots_section(ui: &mut Ui, app: &mut App, pal: &Palette, actions: &mut Vec<Ac
     ui.horizontal(|ui| {
         ui.label("Нагрузка на компьютер:");
         let label = |l: Load| match l {
-            Load::Minimal => "Минимальная (1 поток)",
-            Load::Moderate => "Умеренная (половина ядер)",
-            Load::Maximum => "Максимальная (быстрее всего)",
+            Load::Minimal => "Минимальная — медленно, почти незаметно",
+            Load::Moderate => "Умеренная — обычно хватает",
+            Load::Maximum => "Максимальная — быстро, компьютер может притормаживать",
         };
         let before = app.settings.load;
         ComboBox::from_id_salt("load").selected_text(label(app.settings.load)).show_ui(ui, |ui| {
@@ -180,6 +188,14 @@ fn status_section(ui: &mut Ui, app: &mut App, pal: &Palette, actions: &mut Vec<A
                     .color(pal.muted),
             );
         }
+        if s.deferred > 0 {
+            ui.label(
+                RichText::new(format!("Не читались в прошлый раз, повторная попытка позже: {}", s.deferred))
+                    .size(12.5)
+                    .color(pal.muted),
+            )
+            .on_hover_text("Файлы с ошибкой чтения пробуются снова через несколько часов, а не при каждом проходе");
+        }
         if s.truncated > 0 {
             ui.label(
                 RichText::new(format!("Прочитаны не полностью (лимит текста): {}", s.truncated))
@@ -239,9 +255,14 @@ fn advanced_section(ui: &mut Ui, app: &mut App, actions: &mut Vec<Action>) {
                 ui.add(egui::DragValue::new(&mut app.settings.max_text_mb).range(1..=512));
             });
             ui.horizontal(|ui| {
-                ui.label("Полная проверка раз в, минут:");
-                ui.add(egui::DragValue::new(&mut app.settings.rescan_minutes).range(1..=1440));
-            });
+                ui.label("Полная проверка папок раз в, минут:");
+                ui.add(egui::DragValue::new(&mut app.settings.rescan_minutes).range(5..=10080));
+            })
+            .response
+            .on_hover_text(
+                "Обычно изменения подхватываются сразу по уведомлениям системы; полная проверка — страховка на случай \
+                 пропущенных уведомлений. Для сетевых папок она идёт каждые 10 минут независимо от этого значения.",
+            );
             ui.horizontal(|ui| {
                 ui.label("Тема:");
                 ComboBox::from_id_salt("theme")
@@ -268,6 +289,105 @@ fn advanced_section(ui: &mut Ui, app: &mut App, actions: &mut Vec<Action>) {
     );
 }
 
+fn updates_section(ui: &mut Ui, app: &mut App, pal: &Palette, actions: &mut Vec<Action>) {
+    ui.label(RichText::new("Обновления").strong().size(16.0));
+    ui.label(RichText::new(format!("Поиск файлов · версия {}", env!("CARGO_PKG_VERSION"))).size(12.5).color(pal.muted));
+    if ui
+        .checkbox(&mut app.settings.check_updates, "Проверять обновления автоматически (раз в сутки)")
+        .on_hover_text(
+            "Программа только спрашивает у GitHub номер последней версии; ничего не ставится без вашей кнопки",
+        )
+        .changed()
+    {
+        actions.push(Action::SaveSettings);
+    }
+    ui.horizontal_wrapped(|ui| {
+        if ui.add_enabled(!app.updater.busy(), egui::Button::new("Проверить сейчас")).clicked() {
+            actions.push(Action::CheckUpdates);
+        }
+        match &app.updater.phase {
+            Phase::Idle => {
+                if app.settings.last_update_check > 0 {
+                    ui.label(
+                        RichText::new("Последняя проверка: ".to_string() + &ago(app.settings.last_update_check))
+                            .size(12.5)
+                            .color(pal.muted),
+                    );
+                }
+            }
+            Phase::Checking => {
+                ui.spinner();
+                ui.label(RichText::new("Проверяю…").size(12.5).color(pal.muted));
+            }
+            Phase::UpToDate => {
+                ui.label(RichText::new("У вас последняя версия").size(12.5).color(pal.ok));
+            }
+            Phase::Available(release) => {
+                ui.label(
+                    RichText::new(format!("Доступна версия {} от {}", release.version, release.published))
+                        .size(12.5)
+                        .color(pal.accent),
+                );
+                if ui.button(if release.installable_asset().is_some() { "Обновить" } else { "Скачать" }).clicked()
+                {
+                    actions.push(Action::DownloadUpdate);
+                }
+                if ui.button("Что нового").clicked() {
+                    actions.push(Action::OpenUrl(release.url.clone()));
+                }
+            }
+            Phase::Downloading { done, total, .. } => {
+                let frac = if *total > 0 { (*done as f32 / *total as f32).clamp(0.0, 1.0) } else { 0.0 };
+                ui.add(ProgressBar::new(frac).desired_width(180.0).text("Загрузка…"));
+            }
+            Phase::Ready { release, .. } => {
+                ui.label(RichText::new(format!("Версия {} загружена", release.version)).size(12.5).color(pal.ok));
+                if ui.button("Перезапустить и обновить").clicked() {
+                    actions.push(Action::InstallUpdate);
+                }
+            }
+            Phase::Failed { message, .. } => {
+                ui.label(RichText::new(format!("Не удалось: {}", shorten(message, 80))).size(12.5).color(pal.warn))
+                    .on_hover_text(message.as_str());
+            }
+        }
+    });
+    if app.settings.skipped_version.is_some() {
+        ui.horizontal(|ui| {
+            ui.label(
+                RichText::new(format!("Версия {} пропущена", app.settings.skipped_version.as_deref().unwrap_or("")))
+                    .size(12.5)
+                    .color(pal.muted),
+            );
+            if ui.small_button("Снова предлагать").clicked() {
+                app.settings.skipped_version = None;
+                actions.push(Action::CheckUpdates);
+            }
+        });
+    }
+    ui.horizontal(|ui| {
+        if ui.add(egui::Button::new(RichText::new("Все выпуски на GitHub").size(12.5)).frame(false)).clicked()
+        {
+            actions.push(Action::OpenUrl(file_search::update::RELEASES_URL.to_string()));
+        }
+    });
+}
+
+/// «только что», «2 ч назад», «3 дн. назад» для отметки времени в секундах с 1970 года.
+fn ago(unix_secs: u64) -> String {
+    let now = std::time::SystemTime::now().duration_since(std::time::UNIX_EPOCH).map(|d| d.as_secs()).unwrap_or(0);
+    let d = now.saturating_sub(unix_secs);
+    if d < 90 {
+        "только что".into()
+    } else if d < 3600 {
+        format!("{} мин назад", d / 60)
+    } else if d < 86_400 {
+        format!("{} ч назад", d / 3600)
+    } else {
+        format!("{} дн. назад", d / 86_400)
+    }
+}
+
 fn index_section(ui: &mut Ui, app: &mut App, pal: &Palette, actions: &mut Vec<Action>) {
     ui.label(RichText::new("Индекс").strong().size(16.0));
     ui.label(RichText::new(app.index_dir.display().to_string()).size(12.5).color(pal.muted));
@@ -277,7 +397,10 @@ fn index_section(ui: &mut Ui, app: &mut App, pal: &Palette, actions: &mut Vec<Ac
         }
         if app.confirm_reset {
             ui.label("Удалить индекс и построить заново?");
-            if ui.button(RichText::new("Да, пересоздать").color(Color32::WHITE)).clicked() {
+            if ui
+                .add(egui::Button::new(RichText::new("Да, пересоздать").color(Color32::WHITE)).fill(pal.danger))
+                .clicked()
+            {
                 actions.push(Action::RecreateIndex);
             }
             if ui.button("Отмена").clicked() {

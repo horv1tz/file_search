@@ -14,6 +14,7 @@ use file_search::search::{Hit, Snippet, Sort};
 
 use crate::app::{Action, App, SEARCH_ID};
 use crate::theme::{self, GROUPS, Palette};
+use crate::updater::Phase;
 
 /// Ширина окна, начиная с которой справа показывается панель подробностей о выбранном файле.
 const DETAILS_MIN_WIDTH: f32 = 900.0;
@@ -29,6 +30,16 @@ pub fn draw(ctx: &Context, app: &mut App, actions: &mut Vec<Action>) {
     egui::TopBottomPanel::top("header")
         .frame(Frame::new().fill(fill).inner_margin(Margin { left: 16, right: 16, top: 14, bottom: 8 }))
         .show(ctx, |ui| header(ui, app, &pal, dark, actions));
+    if update_banner_visible(app) {
+        egui::TopBottomPanel::top("update")
+            .frame(Frame::new().fill(pal.card_selected).stroke(Stroke::new(1.0, pal.line)).inner_margin(Margin {
+                left: 16,
+                right: 16,
+                top: 8,
+                bottom: 8,
+            }))
+            .show(ctx, |ui| update_banner(ui, app, &pal, dark, actions));
+    }
     egui::TopBottomPanel::bottom("status")
         .frame(Frame::new().fill(fill).stroke(Stroke::new(1.0, pal.line)).inner_margin(Margin::symmetric(16, 6)))
         .show(ctx, |ui| status_bar(ui, app, &pal, actions));
@@ -64,6 +75,95 @@ pub fn draw(ctx: &Context, app: &mut App, actions: &mut Vec<Action>) {
     egui::CentralPanel::default()
         .frame(Frame::new().fill(fill).inner_margin(Margin::symmetric(16, 4)))
         .show(ctx, |ui| central(ui, app, &pal, dark, actions));
+}
+
+// ------------------------------------------------------------------ обновление
+
+fn update_banner_visible(app: &App) -> bool {
+    !app.updater.dismissed
+        && match &app.updater.phase {
+            Phase::Available(_) | Phase::Downloading { .. } | Phase::Ready { .. } => true,
+            // Ошибка показывается в полосе, только если обновление уже пытались поставить.
+            Phase::Failed { release, .. } => release.is_some(),
+            Phase::Idle | Phase::Checking | Phase::UpToDate => false,
+        }
+}
+
+/// Полоса под шапкой: «Доступна новая версия», ход загрузки, предложение перезапуститься.
+fn update_banner(ui: &mut Ui, app: &mut App, pal: &Palette, dark: bool, actions: &mut Vec<Action>) {
+    let on_accent = if dark { Color32::from_rgb(0x0b, 0x14, 0x2b) } else { Color32::WHITE };
+    let primary = |ui: &mut Ui, text: &str| {
+        ui.add(egui::Button::new(RichText::new(text).strong().color(on_accent)).fill(pal.accent).corner_radius(8.0))
+            .clicked()
+    };
+    let link = |ui: &mut Ui, text: &str| ui.add(egui::Button::new(text).corner_radius(8.0)).clicked();
+    ui.horizontal_wrapped(|ui| {
+        ui.spacing_mut().item_spacing.x = 8.0;
+        match &app.updater.phase {
+            Phase::Available(release) => {
+                ui.label(RichText::new(format!("Доступна новая версия {}", release.version)).strong().size(14.5));
+                ui.label(
+                    RichText::new(format!("(у вас {})", file_search::update::Version::current()))
+                        .size(13.0)
+                        .color(pal.muted),
+                );
+                let installable = release.installable_asset().is_some();
+                if primary(ui, if installable { "Обновить" } else { "Скачать" }) {
+                    actions.push(Action::DownloadUpdate);
+                }
+                if link(ui, "Что нового") {
+                    actions.push(Action::OpenUrl(release.url.clone()));
+                }
+                if link(ui, "Позже") {
+                    actions.push(Action::DismissUpdate);
+                }
+                if ui
+                    .add(egui::Button::new(RichText::new("Пропустить эту версию").color(pal.muted)).frame(false))
+                    .on_hover_text("Не напоминать об этой версии; о следующей сообщим")
+                    .clicked()
+                {
+                    actions.push(Action::SkipUpdateVersion);
+                }
+            }
+            Phase::Downloading { release, done, total } => {
+                ui.label(RichText::new(format!("Загружаю версию {}…", release.version)).strong().size(14.5));
+                let frac = if *total > 0 { (*done as f32 / *total as f32).clamp(0.0, 1.0) } else { 0.0 };
+                let text = if *total > 0 {
+                    format!("{} из {}", format_size(*done), format_size(*total))
+                } else {
+                    format_size(*done)
+                };
+                ui.add(ProgressBar::new(frac).desired_width(220.0).text(text));
+            }
+            Phase::Ready { release, .. } => {
+                ui.label(
+                    RichText::new(format!("Версия {} загружена и проверена", release.version)).strong().size(14.5),
+                );
+                if primary(ui, "Перезапустить и обновить") {
+                    actions.push(Action::InstallUpdate);
+                }
+                if link(ui, "Позже") {
+                    actions.push(Action::DismissUpdate);
+                }
+            }
+            Phase::Failed { message, release } => {
+                ui.label(RichText::new("Не удалось обновить:").strong().color(pal.warn));
+                ui.label(RichText::new(shorten(message, 90)).color(pal.warn)).on_hover_text(message.as_str());
+                if let Some(release) = release {
+                    if link(ui, "Открыть страницу загрузки") {
+                        actions.push(Action::OpenUrl(release.url.clone()));
+                    }
+                    if link(ui, "Повторить") {
+                        actions.push(Action::DownloadUpdate);
+                    }
+                }
+                if link(ui, "Закрыть") {
+                    actions.push(Action::DismissUpdate);
+                }
+            }
+            Phase::Idle | Phase::Checking | Phase::UpToDate => {}
+        }
+    });
 }
 
 // ------------------------------------------------------------------ шапка
@@ -175,7 +275,9 @@ fn header(ui: &mut Ui, app: &mut App, pal: &Palette, dark: bool, actions: &mut V
                 Some(n) => format!("{name}  {n}"),
                 None => (*name).to_string(),
             };
-            if pill(ui, text, on, pal, dark).clicked() {
+            // Тип, которого нет среди найденного, включать бессмысленно: таблетка гаснет (выключить её можно всегда).
+            let enabled = on || count != Some(&0);
+            if ui.add_enabled_ui(enabled, |ui| pill(ui, text, on, pal, dark)).inner.clicked() {
                 app.form.groups[i] = !on;
                 changed = true;
             }
@@ -192,7 +294,7 @@ fn header(ui: &mut Ui, app: &mut App, pal: &Palette, dark: bool, actions: &mut V
             }
         });
         let sort_label = |s: Sort| match s {
-            Sort::Relevance => "По релевантности",
+            Sort::Relevance => "По соответствию",
             Sort::Newest => "Сначала новые",
             Sort::Oldest => "Сначала старые",
             Sort::Largest => "Сначала большие",
@@ -207,7 +309,11 @@ fn header(ui: &mut Ui, app: &mut App, pal: &Palette, dark: bool, actions: &mut V
         match &app.form.dir {
             Some(dir) => {
                 ui.label(format!("Папка: {}", shorten(dir, 44))).on_hover_text(dir.as_str());
-                if ui.small_button("×").on_hover_text("Искать везде").clicked() {
+                if ui
+                    .add(egui::Button::new(RichText::new("×").size(15.0)).min_size(vec2(26.0, 24.0)))
+                    .on_hover_text("Искать везде")
+                    .clicked()
+                {
                     actions.push(Action::ClearDirFilter);
                 }
             }
@@ -221,6 +327,36 @@ fn header(ui: &mut Ui, app: &mut App, pal: &Palette, dark: bool, actions: &mut V
     if changed {
         app.mark_dirty(false);
     }
+}
+
+/// Число с разделителями тысяч: 23 501.
+pub fn thousands(n: u64) -> String {
+    let digits = n.to_string();
+    let mut out = String::with_capacity(digits.len() + digits.len() / 3);
+    for (i, c) in digits.chars().enumerate() {
+        if i > 0 && (digits.len() - i).is_multiple_of(3) {
+            out.push('\u{a0}');
+        }
+        out.push(c);
+    }
+    out
+}
+
+/// Путь, укороченный до ширины `width` отбрасыванием начальных папок: конец пути (ближайшие папки) важнее начала.
+fn fit_path(ui: &Ui, path: &str, width: f32, font: FontId, color: Color32) -> String {
+    let fits = |text: &str| ui.painter().layout_no_wrap(text.to_string(), font.clone(), color).size().x <= width;
+    if fits(path) {
+        return path.to_string();
+    }
+    let sep = if path.contains('\\') { '\\' } else { '/' };
+    let parts: Vec<&str> = path.split(sep).collect();
+    for skip in 1..parts.len() {
+        let candidate = format!("…{sep}{}", parts[skip..].join(&sep.to_string()));
+        if fits(&candidate) {
+            return candidate;
+        }
+    }
+    shorten(path, 24)
 }
 
 /// Укорачивает длинный путь, оставляя конец.
@@ -252,19 +388,32 @@ fn status_bar(ui: &mut Ui, app: &App, pal: &Palette, actions: &mut Vec<Action>) 
             let response = if st.running.load(Ordering::Relaxed) {
                 let total = st.total.load(Ordering::Relaxed);
                 let done = st.done.load(Ordering::Relaxed);
+                let phase = st.phase();
                 let inner = ui.horizontal(|ui| {
-                    if total > 0 {
+                    if total > 0 && phase == "Индексация" {
                         let frac = (done as f32 / total as f32).clamp(0.0, 1.0);
-                        ui.add(ProgressBar::new(frac).desired_width(150.0).text(format!("{done} / {total}")));
-                        ui.label(RichText::new("Индексация").size(12.5).color(pal.accent));
+                        ui.add(
+                            ProgressBar::new(frac)
+                                .desired_width(170.0)
+                                .text(format!("{}\u{a0}%", (frac * 100.0).floor() as u32)),
+                        );
+                        let eta = match app.index_eta_secs {
+                            Some(secs) if secs >= 90 => format!(" · осталось ~{} мин", secs.div_ceil(60)),
+                            Some(_) => " · почти готово".to_string(),
+                            None => String::new(),
+                        };
+                        ui.label(
+                            RichText::new(format!("Индексация: {} из {}{eta}", thousands(done), thousands(total)))
+                                .size(12.5)
+                                .color(pal.accent),
+                        );
                     } else {
                         ui.spinner();
-                        let phase = st.phase();
                         let scanned = st.scanned.load(Ordering::Relaxed);
                         let text = match (phase.is_empty(), scanned) {
                             (true, _) => "Индексация…".to_string(),
                             (false, 0) => phase,
-                            (false, n) => format!("{phase} · найдено файлов: {n}"),
+                            (false, n) => format!("{phase} · найдено файлов: {}", thousands(n)),
                         };
                         ui.label(RichText::new(text).size(12.5).color(pal.accent));
                     }
@@ -272,7 +421,7 @@ fn status_bar(ui: &mut Ui, app: &App, pal: &Palette, actions: &mut Vec<Action>) 
                 inner.response
             } else if st.watching.load(Ordering::Relaxed) {
                 ui.horizontal(|ui| {
-                    ui.label(RichText::new("Слежение за изменениями включено").size(12.5).color(pal.ok));
+                    ui.label(RichText::new("Изменения на диске попадают в поиск сами").size(12.5).color(pal.ok));
                     let (dot, _) = ui.allocate_exact_size(vec2(10.0, 10.0), Sense::hover());
                     ui.painter().circle_filled(dot.center(), 4.0, pal.ok);
                 })
@@ -280,7 +429,7 @@ fn status_bar(ui: &mut Ui, app: &App, pal: &Palette, actions: &mut Vec<Action>) 
             } else if app.settings.roots.is_empty() {
                 ui.label(RichText::new("Папки не выбраны").size(12.5).color(pal.warn))
             } else {
-                ui.label(RichText::new("Автообновление выключено").size(12.5).color(pal.muted))
+                ui.label(RichText::new("Изменения на диске не отслеживаются").size(12.5).color(pal.muted))
             };
             if response.interact(Sense::click()).on_hover_text("Открыть настройки индексации").clicked()
             {
@@ -335,16 +484,27 @@ fn central(ui: &mut Ui, app: &mut App, pal: &Palette, dark: bool, actions: &mut 
 fn results_list(ui: &mut Ui, app: &mut App, pal: &Palette, dark: bool, actions: &mut Vec<Action>) {
     let details_visible = app.details_visible;
     ui.add_space(2.0);
-    ui.label(
-        RichText::new(format!(
-            "Найдено файлов: {} · показано {} · {:.0} мс",
-            app.total,
-            app.results.len(),
-            app.took_ms.max(1.0)
-        ))
-        .size(12.5)
-        .color(pal.muted),
-    );
+    ui.horizontal_wrapped(|ui| {
+        let shown = if app.results.len() < app.total {
+            format!(" · показано {}", thousands(app.results.len() as u64))
+        } else {
+            String::new()
+        };
+        ui.label(
+            RichText::new(format!("Найдено файлов: {}{shown}", thousands(app.total as u64)))
+                .size(12.5)
+                .color(pal.muted),
+        )
+        .on_hover_text(format!("Поиск занял {:.0} мс", app.took_ms.max(1.0)));
+        if app.indexing() {
+            ui.label(
+                RichText::new("· индексация ещё идёт, не прочитанные файлы пока не находятся")
+                    .size(12.5)
+                    .color(pal.accent),
+            )
+            .on_hover_text("Ход индексации — в строке состояния внизу");
+        }
+    });
     let mut scroll = egui::ScrollArea::vertical().id_salt("results").auto_shrink([false, false]);
     if app.scroll_to_top {
         scroll = scroll.vertical_scroll_offset(0.0);
@@ -467,9 +627,15 @@ fn hit_row(
                             ui.label(meta);
                         });
                     });
-                    ui.add(
-                        egui::Label::new(RichText::new(parent_of(&hit.path)).size(12.5).color(pal.muted)).truncate(),
+                    let folder = fit_path(
+                        ui,
+                        &parent_of(&hit.path),
+                        ui.available_width(),
+                        FontId::proportional(12.5),
+                        pal.muted,
                     );
+                    ui.add(egui::Label::new(RichText::new(folder).size(12.5).color(pal.muted)).truncate())
+                        .on_hover_text(&hit.path);
                     if let Some(note) = status_note(&hit.status) {
                         ui.label(RichText::new(note).size(12.5).color(pal.warn));
                     }
@@ -485,20 +651,22 @@ fn hit_row(
                         });
                     }
                     if with_buttons && selected {
-                        ui.add_space(4.0);
-                        ui.horizontal(|ui| {
+                        ui.add_space(6.0);
+                        ui.horizontal_wrapped(|ui| {
                             let openable = is_safe_to_open(std::path::Path::new(&hit.path));
+                            let button = |t: &str| egui::Button::new(t).corner_radius(8.0).min_size(vec2(0.0, 26.0));
                             if ui
-                                .add_enabled(openable, egui::Button::new("Открыть").small())
+                                .add_enabled(openable, button("Открыть"))
+                                .on_hover_text("Enter")
                                 .on_disabled_hover_text("Исполняемые файлы не запускаются отсюда")
                                 .clicked()
                             {
                                 actions.push(Action::Open(index));
                             }
-                            if ui.add(egui::Button::new("В папке").small()).clicked() {
+                            if ui.add(button("В папке")).on_hover_text("Shift+Enter").clicked() {
                                 actions.push(Action::Reveal(index));
                             }
-                            if ui.add(egui::Button::new("Копировать путь").small()).clicked() {
+                            if ui.add(button("Копировать путь")).on_hover_text("Ctrl+C").clicked() {
                                 actions.push(Action::CopyPath(index));
                             }
                         });
@@ -647,7 +815,9 @@ fn text_details(
                 )
                 .truncate(),
             );
-            ui.add(egui::Label::new(RichText::new(parent_of(&hit.path)).size(12.0).color(pal.muted)).truncate())
+            let folder =
+                fit_path(ui, &parent_of(&hit.path), ui.available_width(), FontId::proportional(12.0), pal.muted);
+            ui.add(egui::Label::new(RichText::new(folder).size(12.0).color(pal.muted)).truncate())
                 .on_hover_text(&hit.path);
         });
     });
@@ -795,8 +965,13 @@ fn welcome(ui: &mut Ui, app: &App, pal: &Palette, actions: &mut Vec<Action>) {
         ui.add_space(4.0);
         let status = if indexing && app.num_docs == 0 {
             "Идёт первичная индексация — она может занять несколько минут, искать можно уже сейчас.".to_string()
+        } else if indexing {
+            format!(
+                "Индексация ещё идёт: в поиске пока {} файлов, остальные появятся по мере чтения. Искать можно уже сейчас.",
+                thousands(app.num_docs)
+            )
         } else if app.num_docs > 0 {
-            format!("В индексе файлов: {}. Поиск учитывает словоформы и опечатки.", app.num_docs)
+            format!("В индексе файлов: {}. Поиск учитывает словоформы и опечатки.", thousands(app.num_docs))
         } else {
             "Индекс пока пуст.".to_string()
         };
@@ -814,7 +989,7 @@ fn welcome(ui: &mut Ui, app: &App, pal: &Palette, actions: &mut Vec<Action>) {
             }
         });
         ui.add_space(10.0);
-        ui.label(RichText::new("Горячие клавиши: стрелки вверх и вниз — выбор, Enter — открыть, Shift+Enter — показать в папке, Ctrl+F — в строку поиска, Esc — очистить").size(12.5).color(pal.muted));
+        ui.label(RichText::new("Горячие клавиши: стрелки вверх и вниз — выбор, Enter — открыть, Shift+Enter — показать в папке, Ctrl+C — копировать путь, F3 — следующее совпадение в тексте, Ctrl+F — в строку поиска, Esc — очистить").size(12.5).color(pal.muted));
     });
 }
 

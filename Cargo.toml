@@ -34,6 +34,7 @@ rfd = { version = "0.17.2", optional = true }
 rust-stemmers = "1.2.0"
 serde = { version = "1.0.229", features = ["derive"] }
 serde_json = "1.0.151"
+sha2 = "0.10"
 tantivy = "0.26.2"
 tiny_http = "0.12.0"
 walkdir = "2.5.0"
@@ -60,6 +61,14 @@ codegen-units = 4
 
 [target.'cfg(unix)'.dependencies]
 libc = "0.2"
+
+# Проверка обновлений. На Windows и macOS шифрование берётся у системы (SChannel / Security.framework): ни лишних
+# библиотек в exe, ни корневых сертификатов, которые устаревают. На остальных системах — rustls.
+[target.'cfg(any(windows, target_os = "macos"))'.dependencies]
+ureq = { version = "3.4", default-features = false, features = ["native-tls", "json"] }
+
+[target.'cfg(not(any(windows, target_os = "macos")))'.dependencies]
+ureq = { version = "3.4", default-features = false, features = ["rustls", "json"] }
 
 [dev-dependencies]
 tempfile = "3.27.0"

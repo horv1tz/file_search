@@ -308,21 +308,26 @@ fn index_folder_inside_an_indexed_root_is_never_indexed() {
 }
 
 #[test]
-fn failed_files_are_retried_on_the_next_run() {
+fn failed_files_are_retried_later_not_on_every_run() {
     let env = Env::new();
     let broken = env.root().join("временно.docx");
     fs::write(&broken, b"PK\x03\x04broken").unwrap();
     let first = env.index();
     assert_eq!(first.failed_total, 1);
-    // Без изменений файла повторная попытка всё равно выполняется: сбой мог быть временным.
+    // Битый файл не разбирается заново при каждом проходе: повтор отложен на несколько часов.
     let second = env.index();
-    assert_eq!((second.indexed, second.failed_total), (1, 1), "{second:?}");
-    // Файл «починили» (например, отпустила другая программа) — он читается.
+    assert_eq!((second.indexed, second.deferred, second.failed_total), (0, 1, 0), "{second:?}");
+    // Срок подошёл (здесь — нулевая отсрочка): пробуем снова, сбой мог быть временным.
+    let mut retry_now = Options::new(vec![env.root().to_path_buf()]);
+    retry_now.retry_after = std::time::Duration::ZERO;
+    let third = env.index_with(retry_now);
+    assert_eq!((third.indexed, third.failed_total), (1, 1), "{third:?}");
+    // Файл «починили» (например, отпустила другая программа) — он читается без всякой отсрочки.
     fs::copy(fixture("contract.docx"), &broken).unwrap();
-    let third = env.index();
-    assert_eq!((third.indexed, third.failed_total), (1, 0), "{third:?}");
     let fourth = env.index();
-    assert_eq!(fourth.indexed, 0, "прочитанный файл больше не трогаем");
+    assert_eq!((fourth.indexed, fourth.failed_total), (1, 0), "{fourth:?}");
+    let fifth = env.index();
+    assert_eq!((fifth.indexed, fifth.deferred), (0, 0), "прочитанный файл больше не трогаем");
     assert_eq!(env.search("Кракозябровая").total, 4);
 }
 

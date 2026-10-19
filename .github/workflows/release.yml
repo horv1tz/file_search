@@ -90,11 +90,45 @@ jobs:
     runs-on: ubuntu-latest
     if: github.event_name == 'push' || github.event.inputs.publish == 'true'
     steps:
+      - uses: actions/checkout@v4
       - uses: actions/download-artifact@v4
         with:
           pattern: dist-*
           path: dist
           merge-multiple: true
+
+      # Описание выпуска: раздел этой версии из CHANGELOG.md и таблица «что скачать».
+      - name: Описание выпуска
+        shell: bash
+        run: |
+          version="${TAG#v}"
+          {
+            awk -v v="$version" '
+              $0 ~ "^## " { show = ($2 == v) ; if (show) next }
+              show { print }
+            ' CHANGELOG.md | sed -e '1{/^$/d}' | sed -e '${/^$/d}'
+            echo
+            cat <<'TABLE'
+          ## Что скачать
+
+          | Файл | Для чего |
+          |---|---|
+          | `fsearch-gui-windows-x64.exe` | **Окно программы для Windows** — скачайте и запустите двойным щелчком, установка не нужна |
+          | `fsearch-<версия>-windows-x64.zip` | То же окно и консольная версия `fsearch.exe` |
+          | `fsearch-<версия>-linux-x64.tar.gz` | Linux (x86-64) |
+          | `fsearch-<версия>-macos-arm64.tar.gz` | macOS на процессорах Apple Silicon |
+          | `SHA256SUMS.txt` | Контрольные суммы файлов |
+
+          Если у вас уже стоит программа, она сама предложит обновиться (Windows) или покажет эту страницу.
+
+          Программа не подписана цифровой подписью, поэтому Windows SmartScreen может показать предупреждение
+          «Неизвестный издатель»: нажмите «Подробнее» → «Выполнить в любом случае».
+
+          Быстрый старт: запустите `fsearch-gui`, выберите диск или папку — программа проиндексирует файлы и найдёт их по названию и по тексту внутри (Word, Excel, PowerPoint, PDF, текст).
+          TABLE
+            echo "Подробности — в [README](https://github.com/${{ github.repository }}/blob/${{ github.sha }}/README.md)."
+          } > release-notes.md
+          cat release-notes.md
 
       - name: Контрольные суммы
         working-directory: dist
@@ -110,21 +144,6 @@ jobs:
           tag_name: ${{ env.TAG }}
           target_commitish: ${{ github.sha }}
           name: Поиск файлов ${{ env.TAG }}
-          generate_release_notes: true
+          generate_release_notes: false
           files: dist/*
-          body: |
-            ## Что скачать
-
-            | Файл | Для чего |
-            |---|---|
-            | `fsearch-gui-windows-x64.exe` | **Окно программы для Windows** — скачайте и запустите двойным щелчком, установка не нужна |
-            | `fsearch-<версия>-windows-x64.zip` | То же окно и консольная версия `fsearch.exe` |
-            | `fsearch-<версия>-linux-x64.tar.gz` | Linux (x86-64) |
-            | `fsearch-<версия>-macos-arm64.tar.gz` | macOS на процессорах Apple Silicon |
-            | `SHA256SUMS.txt` | Контрольные суммы файлов |
-
-            Программа не подписана цифровой подписью, поэтому Windows SmartScreen может показать предупреждение
-            «Неизвестный издатель»: нажмите «Подробнее» → «Выполнить в любом случае».
-
-            Быстрый старт: запустите `fsearch-gui`, выберите диск или папку — программа проиндексирует файлы и найдёт их по названию и по тексту внутри (Word, Excel, PowerPoint, PDF, текст).
-            Подробности — в [README](https://github.com/${{ github.repository }}/blob/${{ github.sha }}/README.md).
+          body_path: release-notes.md

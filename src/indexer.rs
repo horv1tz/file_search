@@ -4,7 +4,7 @@ use std::collections::HashMap;
 use std::path::{Path, PathBuf};
 use std::sync::RwLock;
 use std::sync::atomic::{AtomicBool, AtomicU64, AtomicUsize, Ordering};
-use std::time::{Duration, Instant, UNIX_EPOCH};
+use std::time::{Duration, Instant, SystemTime, UNIX_EPOCH};
 
 use anyhow::{Context, Result, anyhow, bail};
 use globset::{GlobBuilder, GlobSet, GlobSetBuilder};
@@ -14,7 +14,7 @@ use tantivy::schema::Term;
 use tantivy::{Index, IndexWriter, ReloadPolicy, TantivyDocument};
 use walkdir::WalkDir;
 
-use crate::extract::{EXTRACTOR_VERSION, Extracted, Limits, Status, UNIT_SEP, extract_file};
+use crate::extract::{Extracted, Limits, Status, UNIT_SEP, extract_file, version_for};
 use crate::netpath::{self, is_network_path};
 use crate::schema::{Fields, path_key};
 
@@ -70,6 +70,8 @@ pub struct Options {
     pub skip_dirs: Vec<PathBuf>,
     /// Читать файлы в фоновом режиме (низкий приоритет процессора и диска), чтобы не мешать работе за компьютером.
     pub background: bool,
+    /// Через сколько снова пробовать файл, который не удалось прочитать (дальше срок удваивается с каждой неудачей).
+    pub retry_after: Duration,
 }
 
 impl Options {
@@ -84,6 +86,7 @@ impl Options {
             commit_every: None,
             skip_dirs: Vec::new(),
             background: false,
+            retry_after: Duration::from_secs(RETRY_BASE),
         }
     }
 }
@@ -111,6 +114,8 @@ pub struct Summary {
     /// Добавлено или обновлено в индексе.
     pub indexed: u64,
     pub removed: u64,
+    /// Файлы, которые не удалось прочитать в прошлый раз; повторная попытка отложена (см. [`retry_due`]).
+    pub deferred: u64,
     pub encrypted: u64,
     pub skipped: u64,
     pub empty: u64,
@@ -132,6 +137,87 @@ struct Candidate {
     mtime: u64,
     /// Файл лежит только в облаке (OneDrive и т. п.): чтение скачало бы его на компьютер.
     cloud: bool,
+    /// Отметка версии из прежней записи в индексе (0 — файла в индексе не было); нужна для счёта попыток.
+    prev_ver: u64,
+}
+
+// ------------------------------------------------------------------ отметка версии записи
+//
+// В поле `ver` записи хранится либо версия извлекателя (файл прочитан, перечитывать не нужно, пока не изменится),
+// либо служебная отметка: «облачная заглушка» (перечитать, когда файл скачают на компьютер) или «ошибка чтения»
+// со временем и числом попыток (перечитать не раньше срока — иначе битый файл разбирался бы при каждом проходе).
+
+/// Облачная заглушка: содержимого на диске нет, читать нечего, пока файл не скачают.
+const CLOUD_MARK: u64 = 1 << 62;
+/// Ошибка чтения: младшие 32 бита — время попытки (секунды с 1970 года), следующие 8 — номер попытки.
+const RETRY_FLAG: u64 = 1 << 61;
+const RETRY_ATTEMPT_SHIFT: u32 = 32;
+/// Первая повторная попытка — через 6 часов, дальше вдвое дольше за каждую неудачу, но не реже раза в неделю.
+const RETRY_BASE: u64 = 6 * 3600;
+const RETRY_MAX: u64 = 7 * 24 * 3600;
+
+fn now_secs() -> u64 {
+    SystemTime::now().duration_since(UNIX_EPOCH).map(|d| d.as_secs()).unwrap_or(0)
+}
+
+/// Отметка «не удалось прочитать» для записи: `attempt` — номер этой попытки (с 1).
+fn retry_mark(attempt: u64, now: u64) -> u64 {
+    RETRY_FLAG | (attempt.min(255) << RETRY_ATTEMPT_SHIFT) | (now & 0xFFFF_FFFF)
+}
+
+fn is_retry_mark(ver: u64) -> bool {
+    ver & RETRY_FLAG != 0 && ver & CLOUD_MARK == 0
+}
+
+/// Сколько попыток чтения уже было у записи с такой отметкой (0 — отметка не об ошибке).
+fn retry_attempts(ver: u64) -> u64 {
+    if is_retry_mark(ver) { (ver >> RETRY_ATTEMPT_SHIFT) & 0xFF } else { 0 }
+}
+
+/// Когда (секунды с 1970 года) можно снова попробовать прочитать файл с такой отметкой:
+/// первая повторная попытка через `base` секунд, дальше вдвое дольше за каждую неудачу, но не реже раза в неделю.
+fn retry_due(ver: u64, base: u64) -> u64 {
+    let attempts = retry_attempts(ver).max(1);
+    let wait = base.saturating_mul(1u64 << (attempts - 1).min(20)).min(RETRY_MAX);
+    (ver & 0xFFFF_FFFF) + wait
+}
+
+/// Отметка версии для новой записи о файле.
+fn version_mark(c: &Candidate, ex: &Extracted) -> u64 {
+    if c.cloud {
+        CLOUD_MARK
+    } else if matches!(ex.status, Status::Failed(_)) {
+        retry_mark(retry_attempts(c.prev_ver) + 1, now_secs())
+    } else {
+        version_for(extension_of(&c.path))
+    }
+}
+
+fn extension_of(path: &Path) -> &str {
+    path.extension().and_then(|e| e.to_str()).unwrap_or("")
+}
+
+/// Что делать с записью, у которой не изменились время и размер файла.
+#[derive(Debug, PartialEq, Eq, Clone, Copy)]
+enum Freshness {
+    /// Запись актуальна, файл перечитывать не нужно.
+    Fresh,
+    /// Прошлое чтение не удалось, срок повторной попытки ещё не подошёл.
+    Deferred,
+    /// Файл нужно перечитать: новая версия извлекателя, скачанная облачная заглушка, подошёл срок повтора.
+    Stale,
+}
+
+fn freshness(stored_ver: u64, c: &Candidate, now: u64, retry_base: u64) -> Freshness {
+    if stored_ver == version_for(extension_of(&c.path)) {
+        Freshness::Fresh
+    } else if stored_ver == CLOUD_MARK {
+        if c.cloud { Freshness::Fresh } else { Freshness::Stale }
+    } else if is_retry_mark(stored_ver) {
+        if now < retry_due(stored_ver, retry_base) { Freshness::Deferred } else { Freshness::Stale }
+    } else {
+        Freshness::Stale
+    }
 }
 
 /// Файл-«заглушка» облачного хранилища: на диске только метаданные, содержимое скачивается при обращении.
@@ -268,9 +354,7 @@ fn build_doc(f: &Fields, c: &Candidate, ex: &Extracted) -> TantivyDocument {
     doc.add_u64(f.size, c.size);
     doc.add_u64(f.mtime, c.mtime);
     doc.add_text(f.status, ex.status.as_string().split(':').next().unwrap_or("ok"));
-    // Ошибки чтения (файл заняла другая программа, сбой сети) и облачные заглушки пробуем снова при следующем проходе.
-    let retry = c.cloud || matches!(ex.status, Status::Failed(_));
-    doc.add_u64(f.ver, if retry { 0 } else { EXTRACTOR_VERSION });
+    doc.add_u64(f.ver, version_mark(c, ex));
     doc
 }
 
@@ -345,7 +429,7 @@ impl Excluder {
 
 fn candidate_from(path: PathBuf, meta: &std::fs::Metadata) -> Candidate {
     let key = path_key(&path.to_string_lossy());
-    Candidate { path, key, size: meta.len(), mtime: mtime_ms(meta), cloud: is_cloud_placeholder(meta) }
+    Candidate { path, key, size: meta.len(), mtime: mtime_ms(meta), cloud: is_cloud_placeholder(meta), prev_ver: 0 }
 }
 
 /// Заменяет запись о файле в индексе: старая удаляется, новая добавляется.
@@ -499,6 +583,8 @@ fn run_inner(
     // Что не удалось прочитать при обходе, то нельзя считать «пропавшим с диска»: папка может быть просто недоступна.
     let mut unreadable_prefixes: Vec<String> = Vec::new();
     let mut unreadable_files: Vec<String> = Vec::new();
+    let now = now_secs();
+    let retry_base = opts.retry_after.as_secs();
     'roots: for (root_index, root) in roots.iter().enumerate() {
         let mut files_here = 0u64;
         let walker = WalkDir::new(root)
@@ -546,14 +632,23 @@ fn run_inner(
             if summary.scanned % 1000 == 0 {
                 progress.scanning(summary.scanned);
             }
-            let cand = candidate_from(entry.into_path(), &meta);
+            let mut cand = candidate_from(entry.into_path(), &meta);
             match existing.remove(&cand.key) {
-                Some(e)
-                    if !opts.force && e.mtime == cand.mtime && e.size == cand.size && e.ver == EXTRACTOR_VERSION =>
-                {
-                    summary.unchanged += 1;
+                Some(e) if !opts.force && e.mtime == cand.mtime && e.size == cand.size => {
+                    match freshness(e.ver, &cand, now, retry_base) {
+                        Freshness::Fresh => summary.unchanged += 1,
+                        Freshness::Deferred => summary.deferred += 1,
+                        Freshness::Stale => {
+                            cand.prev_ver = e.ver;
+                            todo.push(cand);
+                        }
+                    }
                 }
-                _ => todo.push(cand),
+                Some(e) => {
+                    cand.prev_ver = e.ver;
+                    todo.push(cand);
+                }
+                None => todo.push(cand),
             }
         }
         // Сетевая папка, отдавшая пустой список там, где раньше были файлы, почти наверняка просто недоступна
@@ -716,6 +811,55 @@ impl Counters {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    fn cand(name: &str, cloud: bool, prev_ver: u64) -> Candidate {
+        Candidate { path: PathBuf::from(name), key: name.to_string(), size: 1, mtime: 1, cloud, prev_ver }
+    }
+
+    #[test]
+    fn version_marks_distinguish_cloud_retry_and_fresh() {
+        let ok = Extracted::without_content(Status::Ok);
+        let failed = Extracted::without_content(Status::Failed("битый".into()));
+        assert_eq!(version_mark(&cand("a.docx", false, 0), &ok), version_for("docx"));
+        assert_eq!(version_mark(&cand("a.docx", true, 0), &ok), CLOUD_MARK);
+        let first = version_mark(&cand("a.docx", false, 0), &failed);
+        assert!(is_retry_mark(first) && retry_attempts(first) == 1);
+        let second = version_mark(&cand("a.docx", false, first), &failed);
+        assert_eq!(retry_attempts(second), 2);
+        assert!(!is_retry_mark(CLOUD_MARK) && !is_retry_mark(0) && !is_retry_mark(version_for("pdf")));
+    }
+
+    #[test]
+    fn retries_back_off_and_are_capped() {
+        let t = 1_700_000_000;
+        assert_eq!(retry_due(retry_mark(1, t), RETRY_BASE), t + RETRY_BASE);
+        assert_eq!(retry_due(retry_mark(2, t), RETRY_BASE), t + 2 * RETRY_BASE);
+        assert_eq!(retry_due(retry_mark(3, t), RETRY_BASE), t + 4 * RETRY_BASE);
+        assert_eq!(retry_due(retry_mark(40, t), RETRY_BASE), t + RETRY_MAX);
+        assert_eq!(retry_due(retry_mark(300, t), RETRY_BASE), t + RETRY_MAX, "номер попытки не переполняет поле");
+        assert_eq!(retry_due(retry_mark(1, t), 0), t, "нулевая отсрочка — повтор сразу");
+    }
+
+    #[test]
+    fn unchanged_files_are_reread_only_when_there_is_a_reason() {
+        let now = 1_700_000_000;
+        let b = RETRY_BASE;
+        let local = cand("a.pdf", false, 0);
+        assert_eq!(freshness(version_for("pdf"), &local, now, b), Freshness::Fresh);
+        assert_eq!(
+            freshness(0, &local, now, b),
+            Freshness::Stale,
+            "старая отметка «повторить» — перечитываем один раз"
+        );
+        assert_eq!(freshness(version_for("pdf") + 100, &local, now, b), Freshness::Stale, "другая версия извлекателя");
+        // Облачная заглушка: пока файл не скачан, перечитывать нечего; скачали — читаем.
+        assert_eq!(freshness(CLOUD_MARK, &cand("a.pdf", true, 0), now, b), Freshness::Fresh);
+        assert_eq!(freshness(CLOUD_MARK, &local, now, b), Freshness::Stale);
+        // Ошибка чтения: до срока — ждём, после — пробуем снова.
+        let mark = retry_mark(1, now - 60);
+        assert_eq!(freshness(mark, &local, now, b), Freshness::Deferred);
+        assert_eq!(freshness(mark, &local, now + b, b), Freshness::Stale);
+    }
 
     #[test]
     fn unreadable_places_protect_their_documents() {

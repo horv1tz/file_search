@@ -55,6 +55,8 @@ enum Command {
         #[arg(short, long)]
         yes: bool,
     },
+    /// Проверить, вышла ли новая версия программы
+    Update,
     /// Показать, какой текст извлекается из файла (для диагностики)
     Extract {
         file: PathBuf,
@@ -129,8 +131,8 @@ struct WatchArgs {
     paths: Vec<PathBuf>,
     #[command(flatten)]
     scan: ScanArgs,
-    /// Как часто делать полную проверку на случай пропущенных событий, минут
-    #[arg(long, default_value_t = 30, value_name = "МИНУТ")]
+    /// Как часто делать полную проверку на случай пропущенных событий, минут (сетевые папки — не реже раза в 10 минут)
+    #[arg(long, default_value_t = watcher::DEFAULT_RESCAN_MINUTES, value_name = "МИНУТ")]
     rescan_minutes: u64,
 }
 
@@ -243,7 +245,24 @@ fn run() -> Result<()> {
         Command::Stats => cmd_stats(&dir),
         Command::Reset { yes } => cmd_reset(&dir, yes),
         Command::Extract { file, full } => cmd_extract(&file, full),
+        Command::Update => cmd_update(),
     }
+}
+
+fn cmd_update() -> Result<()> {
+    use file_search::update::{Client, RELEASES_URL, Version};
+    println!("Установлена версия {}. Проверяю…", Version::current());
+    match Client::new().check()? {
+        Some(release) => {
+            println!("{} {} от {}", style("Доступна новая версия").green().bold(), release.version, release.published);
+            println!("Скачать: {}", release.url);
+            if let Some(asset) = release.installable_asset() {
+                println!("Окно программы обновляется само: в нём есть кнопка «Обновить». Файл: {}", asset.url);
+            }
+        }
+        None => println!("{} Все выпуски: {RELEASES_URL}", style("У вас последняя версия.").green()),
+    }
+    Ok(())
 }
 
 // ------------------------------------------------------------------ index
@@ -373,6 +392,9 @@ fn print_summary(s: &Summary, all_errors: bool) {
     println!("  Файлов найдено:            {}", s.scanned);
     println!("  Добавлено или обновлено:   {}", s.indexed);
     println!("  Без изменений:             {}", s.unchanged);
+    if s.deferred > 0 {
+        println!("  Повтор чтения отложен:     {} (не читались в прошлый раз)", s.deferred);
+    }
     println!("  Удалено из индекса:        {}", s.removed);
     println!("  Извлечено текста:          {}", format_size(s.text_bytes));
     if s.encrypted > 0 {

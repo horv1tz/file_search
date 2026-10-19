@@ -127,6 +127,17 @@ impl Preview {
         }
     }
 
+    /// Переход к следующему (или предыдущему) совпадению — для F3 / Shift+F3.
+    pub fn step_match(&mut self, forward: bool) {
+        if let State::Ready(doc) = &mut self.state
+            && !doc.matches.is_empty()
+        {
+            let n = doc.matches.len();
+            doc.current = if forward { (doc.current + 1) % n } else { (doc.current + n - 1) % n };
+            doc.scroll_to_match = true;
+        }
+    }
+
     fn poll(&mut self) {
         if let (State::Loading, Ok(result)) = (&self.state, self.rx.try_recv()) {
             self.state = match result {
@@ -207,11 +218,13 @@ fn doc_view(ui: &mut Ui, doc: &mut Doc, terms: &[String], pal: &Palette, dark: b
         if !doc.matches.is_empty() {
             ui.with_layout(Layout::right_to_left(Align::Center), |ui| {
                 let n = doc.matches.len();
-                if ui.small_button("▶").on_hover_text("Следующее совпадение").clicked() {
+                let arrow = |t: &str| egui::Button::new(RichText::new(t).size(13.0)).min_size(vec2(32.0, 24.0));
+                if ui.add(arrow("▶")).on_hover_text("Следующее совпадение (F3)").clicked() {
                     doc.current = (doc.current + 1) % n;
                     doc.scroll_to_match = true;
                 }
-                if ui.small_button("◀").on_hover_text("Предыдущее совпадение").clicked() {
+                if ui.add(arrow("◀")).on_hover_text("Предыдущее совпадение (Shift+F3)").clicked()
+                {
                     doc.current = (doc.current + n - 1) % n;
                     doc.scroll_to_match = true;
                 }

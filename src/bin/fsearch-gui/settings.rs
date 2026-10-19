@@ -4,7 +4,15 @@ use std::fs;
 use std::path::{Path, PathBuf};
 
 use file_search::schema::path_covers;
+use file_search::watcher::DEFAULT_RESCAN_MINUTES;
 use serde::{Deserialize, Serialize};
+
+/// Версия формата настроек: при обновлении программы значения, выставленные старыми умолчаниями, переводятся на новые.
+const SETTINGS_VERSION: u32 = 2;
+
+fn legacy_settings_version() -> u32 {
+    0
+}
 
 #[derive(Clone, Copy, PartialEq, Eq, Serialize, Deserialize, Default, Debug)]
 pub enum Theme {
@@ -43,9 +51,24 @@ impl Load {
     }
 }
 
+/// Режим, сортировка и фильтры типов — как их оставили в прошлый раз.
+#[derive(Clone, Serialize, Deserialize, Debug, PartialEq, Eq, Default)]
+#[serde(default)]
+pub struct SavedForm {
+    /// `all` | `name` | `content`.
+    pub mode: String,
+    /// `relevance` | `newest` | `oldest` | `largest` | `smallest`.
+    pub sort: String,
+    /// Включённые фильтры типов (по порядку `theme::GROUPS`).
+    pub groups: Vec<bool>,
+}
+
 #[derive(Clone, Serialize, Deserialize, Debug, PartialEq)]
 #[serde(default)]
 pub struct Settings {
+    /// Версия формата (см. [`Settings::migrate`]); в файле без этого поля — 0.
+    #[serde(default = "legacy_settings_version")]
+    pub settings_version: u32,
     /// Нагрузка на компьютер при индексации.
     pub load: Load,
     /// Папки и диски, по которым ищем.
@@ -63,11 +86,20 @@ pub struct Settings {
     pub rescan_minutes: u64,
     /// Папки, убранные из списка, записи которых ещё не удалены из индекса (удаление повторяется при запуске).
     pub pending_removals: Vec<PathBuf>,
+    /// Проверять, не вышла ли новая версия (раз в сутки, при запуске).
+    pub check_updates: bool,
+    /// Когда проверяли в последний раз, секунды с 1970 года.
+    pub last_update_check: u64,
+    /// Версия, которую пользователь просил больше не предлагать.
+    pub skipped_version: Option<String>,
+    /// Состояние формы поиска на момент выхода.
+    pub form: SavedForm,
 }
 
 impl Default for Settings {
     fn default() -> Self {
         Settings {
+            settings_version: SETTINGS_VERSION,
             load: Load::default(),
             roots: Vec::new(),
             watch: true,
@@ -76,8 +108,12 @@ impl Default for Settings {
             max_text_mb: 16,
             theme: Theme::Auto,
             index_dir: None,
-            rescan_minutes: 30,
+            rescan_minutes: DEFAULT_RESCAN_MINUTES,
             pending_removals: Vec::new(),
+            check_updates: true,
+            last_update_check: 0,
+            skipped_version: None,
+            form: SavedForm::default(),
         }
     }
 }
@@ -89,7 +125,19 @@ pub fn settings_path() -> PathBuf {
 impl Settings {
     /// Читает настройки; при отсутствии или порче файла возвращает значения по умолчанию.
     pub fn load(path: &Path) -> Settings {
-        fs::read_to_string(path).ok().and_then(|text| serde_json::from_str(&text).ok()).unwrap_or_default()
+        let mut settings: Settings =
+            fs::read_to_string(path).ok().and_then(|text| serde_json::from_str(&text).ok()).unwrap_or_default();
+        settings.migrate();
+        settings
+    }
+
+    /// Переводит настройки старых версий на текущие умолчания там, где пользователь их не менял.
+    fn migrate(&mut self) {
+        if self.settings_version < 2 && self.rescan_minutes == 30 {
+            // Раньше полная проверка шла каждые 30 минут и заметно нагружала диск.
+            self.rescan_minutes = DEFAULT_RESCAN_MINUTES;
+        }
+        self.settings_version = SETTINGS_VERSION;
     }
 
     /// Сохраняет через временный файл, чтобы сбой посреди записи не испортил настройки.
@@ -150,6 +198,20 @@ mod tests {
             !partial.watch && partial.default_excludes && partial.max_text_mb == 16,
             "новые поля берут значения по умолчанию"
         );
+    }
+
+    #[test]
+    fn old_rescan_default_is_migrated_but_custom_values_stay() {
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("settings.json");
+        fs::write(&path, r#"{"rescan_minutes": 30}"#).unwrap();
+        let s = Settings::load(&path);
+        assert_eq!(s.rescan_minutes, DEFAULT_RESCAN_MINUTES, "старое умолчание переводится на новое");
+        assert_eq!(s.settings_version, SETTINGS_VERSION);
+        fs::write(&path, r#"{"rescan_minutes": 15}"#).unwrap();
+        assert_eq!(Settings::load(&path).rescan_minutes, 15, "выставленное вручную не трогаем");
+        fs::write(&path, r#"{"settings_version": 2, "rescan_minutes": 30}"#).unwrap();
+        assert_eq!(Settings::load(&path).rescan_minutes, 30, "в новом формате 30 — осознанный выбор");
     }
 
     #[test]

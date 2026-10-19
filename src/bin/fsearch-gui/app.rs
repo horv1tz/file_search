@@ -13,8 +13,9 @@ use file_search::schema::default_index_dir;
 use file_search::search::{Hit, SearchOptions, Sort};
 
 use crate::backend::{Backend, Reply, SearchRequest};
-use crate::settings::{Settings, Theme, settings_path};
+use crate::settings::{SavedForm, Settings, Theme, settings_path};
 use crate::theme::{self, GROUPS};
+use crate::updater::{self, Phase, Updater};
 use crate::{settings_ui, views};
 
 /// Сколько результатов подгружается за раз.
@@ -45,6 +46,48 @@ pub struct Form {
 impl Form {
     fn new(query: String) -> Form {
         Form { query, groups: [false; GROUPS.len()], mode: Mode::All, sort: Sort::Relevance, dir: None }
+    }
+
+    /// Форма с режимом, сортировкой и фильтрами типов из прошлого сеанса (папка не восстанавливается:
+    /// это разовое сужение, которое легко забыть).
+    fn restored(query: String, saved: &SavedForm) -> Form {
+        let mut form = Form::new(query);
+        form.mode = match saved.mode.as_str() {
+            "name" => Mode::Name,
+            "content" => Mode::Content,
+            _ => Mode::All,
+        };
+        form.sort = match saved.sort.as_str() {
+            "newest" => Sort::Newest,
+            "oldest" => Sort::Oldest,
+            "largest" => Sort::Largest,
+            "smallest" => Sort::Smallest,
+            _ => Sort::Relevance,
+        };
+        for (i, on) in saved.groups.iter().enumerate().take(GROUPS.len()) {
+            form.groups[i] = *on;
+        }
+        form
+    }
+
+    fn saved(&self) -> SavedForm {
+        SavedForm {
+            mode: match self.mode {
+                Mode::All => "all",
+                Mode::Name => "name",
+                Mode::Content => "content",
+            }
+            .into(),
+            sort: match self.sort {
+                Sort::Relevance => "relevance",
+                Sort::Newest => "newest",
+                Sort::Oldest => "oldest",
+                Sort::Largest => "largest",
+                Sort::Smallest => "smallest",
+            }
+            .into(),
+            groups: self.groups.to_vec(),
+        }
     }
 
     pub fn is_empty(&self) -> bool {
@@ -87,6 +130,9 @@ pub enum Action {
     PickRoot,
     PickFilterFolder,
     RemoveRoot(usize),
+    /// Спросить подтверждение перед удалением папки из поиска.
+    ConfirmRemoveRoot(usize),
+    CancelRemoveRoot,
     OpenSettings,
     CloseSettings,
     ApplySettings {
@@ -96,12 +142,29 @@ pub enum Action {
     ClearDirFilter,
     RecreateIndex,
     OpenIndexFolder,
+    /// Сохранить настройки, не перезапуская индексацию (для параметров, которые на неё не влияют).
+    SaveSettings,
+    /// Проверить обновления по кнопке.
+    CheckUpdates,
+    /// Загрузить найденное обновление (или открыть страницу выпуска там, где само не ставится).
+    DownloadUpdate,
+    /// Поставить загруженное обновление и перезапустить программу.
+    InstallUpdate,
+    /// Скрыть предложение обновиться до следующего запуска.
+    DismissUpdate,
+    /// Больше не предлагать эту версию.
+    SkipUpdateVersion,
+    OpenUrl(String),
 }
 
 pub struct App {
     pub backend: Option<Backend>,
     pub backend_error: Option<String>,
     pub settings: Settings,
+    pub updater: Updater,
+    started: Instant,
+    /// Когда в этом сеансе в следующий раз проверять обновления автоматически.
+    next_update_check: Instant,
     settings_path: PathBuf,
     pub index_dir: PathBuf,
 
@@ -147,6 +210,13 @@ pub struct App {
     applied_theme: Theme,
     pub excludes_text: String,
     pub confirm_reset: bool,
+    /// Номер папки в списке «Где искать», удаление которой ждёт подтверждения.
+    pub confirm_remove: Option<usize>,
+    /// Шла ли индексация в прошлом кадре: по её окончании показываем итог.
+    index_was_running: bool,
+    /// Отметка для оценки оставшегося времени: (когда, сколько было готово).
+    index_mark: Option<(Instant, u64)>,
+    pub index_eta_secs: Option<u64>,
 
     screenshot: Option<ScreenshotPlan>,
 }
@@ -177,6 +247,10 @@ fn open_error_text(e: &std::io::Error) -> String {
 }
 
 /// Запускает поиск типовых мест для быстрого добавления: «Документы», «Рабочий стол», «Загрузки» и диски.
+fn unix_now() -> u64 {
+    std::time::SystemTime::now().duration_since(std::time::UNIX_EPOCH).map(|d| d.as_secs()).unwrap_or(0)
+}
+
 /// Каждый диск проверяется в своём потоке: отключённый сетевой диск отвечает секундами и не должен
 /// задерживать остальные кнопки.
 fn discover_places(tx: Sender<(String, PathBuf)>, ctx: Context) {
@@ -235,14 +309,18 @@ impl App {
         let (dialog_tx, dialog_rx) = channel();
         let (toast_tx, toast_rx) = channel();
 
+        let saved_form = settings.form.clone();
         let mut app = App {
             backend,
             backend_error,
+            updater: Updater::new(ctx.clone()),
+            started: Instant::now(),
+            next_update_check: Instant::now() + updater::FIRST_CHECK_AFTER,
             excludes_text: settings.excludes.join("\n"),
             settings,
             settings_path,
             index_dir,
-            form: Form::new(launch.query.clone()),
+            form: Form::restored(launch.query.clone(), &saved_form),
             next_id: 0,
             current_id: 0,
             results: Vec::new(),
@@ -276,6 +354,10 @@ impl App {
             toast_rx,
             applied_theme: settings_theme,
             confirm_reset: false,
+            confirm_remove: None,
+            index_was_running: false,
+            index_mark: None,
+            index_eta_secs: None,
             screenshot: launch.screenshot.map(|path| ScreenshotPlan {
                 path,
                 requested: false,
@@ -397,9 +479,11 @@ impl App {
         while let Ok(place) = self.places_rx.try_recv() {
             if !self.places.iter().any(|(_, p)| *p == place.1) {
                 self.places.push(place);
-                self.places.sort_by(|a, b| a.0.cmp(&b.0));
+                // Сначала папки пользователя (их индексировать быстро и полезно), затем целые диски.
+                self.places.sort_by_key(|(name, _)| (name.starts_with("Диск "), name.clone()));
             }
         }
+        self.track_indexing();
         while let Ok(text) = self.toast_rx.try_recv() {
             self.toast(text);
         }
@@ -423,6 +507,14 @@ impl App {
                 DialogResult::NetFailed(text) => {
                     self.net_checking = false;
                     self.net_error = Some(text);
+                }
+            }
+        }
+        for event in self.updater.poll(self.settings.skipped_version.as_deref()) {
+            match event {
+                updater::Event::Checked => {
+                    self.settings.last_update_check = unix_now();
+                    self.save_settings();
                 }
             }
         }
@@ -497,6 +589,47 @@ impl App {
 
     pub fn toast(&mut self, text: impl Into<String>) {
         self.toast = Some((text.into(), Instant::now()));
+    }
+
+    /// Идёт проход по файлам (первичная индексация, обновление или полная проверка).
+    pub fn indexing(&self) -> bool {
+        self.backend.as_ref().is_some_and(|b| b.state.running.load(Ordering::Relaxed))
+    }
+
+    /// Следит за ходом индексации: оценивает оставшееся время и сообщает об окончании прохода.
+    fn track_indexing(&mut self) {
+        let Some(backend) = &self.backend else { return };
+        let st = &backend.state;
+        let running = st.running.load(Ordering::Relaxed);
+        if running {
+            let (done, total) = (st.done.load(Ordering::Relaxed), st.total.load(Ordering::Relaxed));
+            match self.index_mark {
+                Some((at, start)) if total > 0 && done > start && at.elapsed() >= Duration::from_secs(5) => {
+                    let rate = (done - start) as f64 / at.elapsed().as_secs_f64();
+                    self.index_eta_secs = Some(((total.saturating_sub(done)) as f64 / rate.max(1e-6)).ceil() as u64);
+                }
+                Some(_) => {}
+                None if total > 0 => self.index_mark = Some((Instant::now(), done)),
+                None => {}
+            }
+        } else {
+            self.index_mark = None;
+            self.index_eta_secs = None;
+        }
+        if self.index_was_running && !running {
+            let summary = st.summary.lock().unwrap().clone();
+            if let Some(s) = summary
+                && !s.cancelled
+                && s.indexed + s.removed > 0
+            {
+                let mut text = format!("Индексация завершена: обновлено файлов — {}", s.indexed);
+                if s.failed_total > 0 {
+                    text.push_str(&format!(", не удалось прочитать — {} (см. настройки)", s.failed_total));
+                }
+                self.toast(text);
+            }
+        }
+        self.index_was_running = running;
     }
 
     fn hit_path(&self, index: usize) -> Option<PathBuf> {
@@ -610,10 +743,14 @@ impl App {
             Action::PickRoot => self.pick_folder(ctx, false),
             Action::PickFilterFolder => self.pick_folder(ctx, true),
             Action::RemoveRoot(i) => {
-                if self.settings.remove_root(i).is_some() {
+                self.confirm_remove = None;
+                if let Some(root) = self.settings.remove_root(i) {
                     self.apply_settings(ctx, false);
+                    self.toast(format!("Папка «{}» убрана из поиска", root.display()));
                 }
             }
+            Action::ConfirmRemoveRoot(i) => self.confirm_remove = Some(i),
+            Action::CancelRemoveRoot => self.confirm_remove = None,
             Action::OpenSettings => self.show_settings = true,
             Action::AddRootText(text) => {
                 if self.net_checking {
@@ -655,7 +792,62 @@ impl App {
             Action::OpenIndexFolder => {
                 let _ = platform::open_path(&self.index_dir);
             }
+            Action::SaveSettings => self.save_settings(),
+            Action::CheckUpdates => self.updater.check(true),
+            Action::DownloadUpdate => {
+                let page = self.updater.phase.release().map(|r| r.url.clone());
+                if self.updater.phase.release().is_some_and(|r| r.installable_asset().is_some()) {
+                    self.updater.download();
+                } else if let Some(url) = page {
+                    ctx.open_url(egui::OpenUrl::new_tab(url));
+                }
+            }
+            Action::InstallUpdate => self.install_update(ctx),
+            Action::DismissUpdate => self.updater.dismissed = true,
+            Action::SkipUpdateVersion => {
+                if let Some(release) = self.updater.phase.release() {
+                    self.settings.skipped_version = Some(release.version.to_string());
+                    self.save_settings();
+                }
+                self.updater.dismissed = true;
+            }
+            Action::OpenUrl(url) => ctx.open_url(egui::OpenUrl::new_tab(url)),
         }
+    }
+
+    /// Ставит загруженное обновление на место и закрывает окно; новая версия запускается после закрытия.
+    fn install_update(&mut self, ctx: &Context) {
+        let Phase::Ready { file, release } = &self.updater.phase else { return };
+        let (file, release) = (file.clone(), release.clone());
+        match file_search::update::install_self(&file) {
+            Ok(exe) => {
+                self.updater.installed();
+                self.save_settings();
+                crate::request_relaunch(exe);
+                ctx.send_viewport_cmd(egui::ViewportCommand::Close);
+            }
+            Err(e) => {
+                let _ = std::fs::remove_file(&file);
+                self.updater.phase = Phase::Failed { message: format!("{e:#}"), release: Some(release) };
+            }
+        }
+    }
+
+    /// Автоматическая проверка обновлений: через несколько секунд после запуска и дальше раз в сутки,
+    /// если с прошлой проверки (в том числе в прошлых сеансах) прошли сутки.
+    fn auto_check_updates(&mut self, ctx: &Context) {
+        if !self.settings.check_updates || self.started.elapsed() < updater::FIRST_CHECK_AFTER {
+            return;
+        }
+        if Instant::now() < self.next_update_check {
+            return;
+        }
+        self.next_update_check = Instant::now() + updater::CHECK_EVERY;
+        let since_last = unix_now().saturating_sub(self.settings.last_update_check);
+        if since_last >= updater::CHECK_EVERY.as_secs() && matches!(self.updater.phase, Phase::Idle | Phase::UpToDate) {
+            self.updater.check(false);
+        }
+        ctx.request_repaint_after(updater::CHECK_EVERY);
     }
 
     // ------------------------------------------------------------ клавиатура
@@ -668,8 +860,41 @@ impl App {
         if ctx.input_mut(|i| i.consume_key(Modifiers::COMMAND, Key::F) || i.consume_key(Modifiers::COMMAND, Key::L)) {
             self.focus_search = true;
         }
+        if self.show_settings && ctx.input_mut(|i| i.consume_key(Modifiers::NONE, Key::Escape)) {
+            self.show_settings = false;
+            self.confirm_reset = false;
+            self.confirm_remove = None;
+            self.focus_search = true;
+            return actions;
+        }
         if typing_elsewhere || self.show_settings || egui::Popup::is_any_open(ctx) {
             return actions;
+        }
+
+        // Ctrl+C копирует путь выбранного файла, если в строке поиска ничего не выделено (иначе — выделенный текст).
+        let selection_in_search = egui::TextEdit::load_state(ctx, search_id)
+            .and_then(|s| s.cursor.char_range())
+            .is_some_and(|r| r.primary != r.secondary);
+        if !selection_in_search && let Some(i) = self.selected.filter(|i| *i < self.results.len()) {
+            let (copy_name, copy_path) = ctx.input_mut(|inp| {
+                (
+                    inp.consume_key(Modifiers::COMMAND | Modifiers::SHIFT, Key::C),
+                    inp.consume_key(Modifiers::COMMAND, Key::C),
+                )
+            });
+            if copy_name {
+                actions.push(Action::CopyName(i));
+            } else if copy_path {
+                actions.push(Action::CopyPath(i));
+            }
+        }
+        // F3 / Shift+F3 — по совпадениям в открытом тексте.
+        let (next, prev) =
+            ctx.input_mut(|i| (i.consume_key(Modifiers::NONE, Key::F3), i.consume_key(Modifiers::SHIFT, Key::F3)));
+        if (next || prev)
+            && let Some(preview) = &mut self.preview
+        {
+            preview.step_match(next);
         }
 
         // Стрелки, Enter и Esc обрабатываем до того, как поле ввода успеет забрать их себе.
@@ -789,6 +1014,7 @@ impl eframe::App for App {
             }
         }
 
+        self.auto_check_updates(ctx);
         views::draw(ctx, self, &mut actions);
         settings_ui::show(ctx, self, &mut actions);
         views::toast(ctx, &mut self.toast);
@@ -807,6 +1033,7 @@ impl eframe::App for App {
     }
 
     fn on_exit(&mut self, _gl: Option<&eframe::glow::Context>) {
+        self.settings.form = self.form.saved();
         self.save_settings();
         if let Some(backend) = &mut self.backend {
             backend.shutdown();
