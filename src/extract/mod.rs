@@ -2,6 +2,7 @@
 
 pub mod doc;
 pub mod legacy;
+pub mod ocr;
 pub mod odf;
 pub mod ooxml;
 pub mod pdf;
@@ -99,17 +100,33 @@ impl fmt::Display for NoTextLayer {
 
 impl std::error::Error for NoTextLayer {}
 
+/// PDF — скан, распознавание картинок выполнялось, но текста не нашло.
+#[derive(Debug)]
+pub struct NoTextRecognized;
+
+impl fmt::Display for NoTextRecognized {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        f.write_str("скан, текст не распознан")
+    }
+}
+
+impl std::error::Error for NoTextRecognized {}
+
 #[derive(Debug, Clone)]
 pub struct Limits {
     /// Максимум текста, который берём из одного файла.
     pub max_text_bytes: usize,
     /// Файлы больше этого размера индексируются только по имени.
     pub max_file_size: u64,
+    /// Распознавать текст на сканах (PDF без текстового слоя), если в системе есть чем.
+    pub ocr: bool,
+    /// Сколько страниц одного файла распознавать: остальные не читаются (распознавание медленное).
+    pub ocr_max_pages: usize,
 }
 
 impl Default for Limits {
     fn default() -> Self {
-        Limits { max_text_bytes: 16 << 20, max_file_size: 512 << 20 }
+        Limits { max_text_bytes: 16 << 20, max_file_size: 512 << 20, ocr: false, ocr_max_pages: 30 }
     }
 }
 
@@ -294,10 +311,12 @@ pub fn extract_file(path: &Path, size: u64, limits: &Limits) -> Extracted {
 
     let mut extracted = doc.finish();
     match error {
+        None if extracted.ocr && extracted.status == Status::Ok => extracted.status = Status::Recognized,
         None => {}
         Some(e) if e.downcast_ref::<Encrypted>().is_some() => extracted.status = Status::Encrypted,
         Some(e) if e.downcast_ref::<NotText>().is_some() => extracted.status = Status::Skipped(e.to_string()),
-        Some(e) if e.downcast_ref::<NoTextLayer>().is_some() => extracted.status = Status::Skipped(e.to_string()),
+        Some(e) if e.downcast_ref::<NoTextLayer>().is_some() => extracted.status = Status::Scan,
+        Some(e) if e.downcast_ref::<NoTextRecognized>().is_some() => extracted.status = Status::Skipped(e.to_string()),
         Some(e) => extracted.status = Status::Failed(format!("{e:#}")),
     }
     extracted
@@ -306,7 +325,7 @@ pub fn extract_file(path: &Path, size: u64, limits: &Limits) -> Extracted {
 fn run(path: &Path, kind: Kind, limits: &Limits, out: &mut Doc) -> anyhow::Result<()> {
     match kind {
         Kind::Office | Kind::Odf => office(path, limits, out),
-        Kind::Pdf => pdf::extract(path, out),
+        Kind::Pdf => pdf::extract(path, out, limits),
         Kind::Rtf => plain(path, limits, out, PlainMode::Rtf),
         Kind::Html => plain(path, limits, out, PlainMode::Html),
         Kind::Text => plain(path, limits, out, PlainMode::Text),

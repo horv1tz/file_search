@@ -117,6 +117,10 @@ pub struct Summary {
     /// Файлы, которые не удалось прочитать в прошлый раз; повторная попытка отложена (см. [`retry_due`]).
     pub deferred: u64,
     pub encrypted: u64,
+    /// Файлы, текст которых получен распознаванием картинок (сканы).
+    pub recognized: u64,
+    /// Сканы, которые не распознавались (распознавание выключено или недоступно).
+    pub scans: u64,
     pub skipped: u64,
     pub empty: u64,
     pub truncated: u64,
@@ -218,9 +222,10 @@ enum Freshness {
     Stale,
 }
 
-fn freshness(stored_ver: u64, c: &Candidate, now: u64, retry_base: u64) -> Freshness {
+fn freshness(stored_ver: u64, c: &Candidate, now: u64, retry_base: u64, rescan_scan: bool) -> Freshness {
     if stored_ver == version_for(extension_of(&c.path)) {
-        Freshness::Fresh
+        // Скан, прочитанный до включения распознавания, стоит прочитать ещё раз — теперь текст можно распознать.
+        if rescan_scan { Freshness::Stale } else { Freshness::Fresh }
     } else if stored_ver == CLOUD_MARK {
         if c.cloud { Freshness::Fresh } else { Freshness::Stale }
     } else if is_retry_mark(stored_ver) {
@@ -264,6 +269,8 @@ struct Existing {
     mtime: u64,
     size: u64,
     ver: u64,
+    /// В индексе файл записан как скан, который не распознавался.
+    scan: bool,
 }
 
 /// Приводит корень к абсолютному виду: `D:` → `D:\`, без `..`, без завершающего разделителя.
@@ -316,7 +323,9 @@ fn load_existing(index: &Index, fields: &Fields, prefixes: &[String]) -> Result<
         let mtime = ff.u64("mtime")?;
         let size = ff.u64("size")?;
         let ver = ff.u64("ver")?;
+        let status = ff.str(index.schema().get_field_name(fields.status))?;
         let mut buf = String::new();
+        let mut status_buf = String::new();
         for doc in 0..seg.max_doc() {
             if seg.is_deleted(doc) {
                 continue;
@@ -327,12 +336,19 @@ fn load_existing(index: &Index, fields: &Fields, prefixes: &[String]) -> Result<
             if !prefixes.iter().any(|p| buf.starts_with(p.as_str())) {
                 continue;
             }
+            status_buf.clear();
+            if let Some(status) = &status
+                && let Some(ord) = status.term_ords(doc).next()
+            {
+                let _ = status.ord_to_str(ord, &mut status_buf);
+            }
             map.insert(
                 buf.clone(),
                 Existing {
                     mtime: mtime.first(doc).unwrap_or(0),
                     size: size.first(doc).unwrap_or(0),
                     ver: ver.first(doc).unwrap_or(0),
+                    scan: status_buf == "scan",
                 },
             );
         }
@@ -602,6 +618,8 @@ fn run_inner(
     let mut unreadable_files: Vec<String> = Vec::new();
     let now = now_secs();
     let retry_base = opts.retry_after.as_secs();
+    // Распознавание включено и в системе есть чем: сканы, записанные без текста, перечитываются.
+    let ocr_on = opts.limits.ocr && crate::extract::ocr::available();
     'roots: for (root_index, root) in roots.iter().enumerate() {
         let mut files_here = 0u64;
         let walker = WalkDir::new(root)
@@ -652,7 +670,7 @@ fn run_inner(
             let mut cand = candidate_from(entry.into_path(), &meta);
             match existing.remove(&cand.key) {
                 Some(e) if !opts.force && e.mtime == cand.mtime && e.size == cand.size => {
-                    match freshness(e.ver, &cand, now, retry_base) {
+                    match freshness(e.ver, &cand, now, retry_base, ocr_on && e.scan) {
                         Freshness::Fresh => summary.unchanged += 1,
                         Freshness::Deferred => summary.deferred += 1,
                         Freshness::Stale => {
@@ -789,6 +807,8 @@ fn run_inner(
 
     summary.indexed = indexed.load(Ordering::Relaxed);
     summary.encrypted = counters.encrypted.load(Ordering::Relaxed);
+    summary.recognized = counters.recognized.load(Ordering::Relaxed);
+    summary.scans = counters.scans.load(Ordering::Relaxed);
     summary.skipped = counters.skipped.load(Ordering::Relaxed);
     summary.empty = counters.empty.load(Ordering::Relaxed);
     summary.truncated = counters.truncated.load(Ordering::Relaxed);
@@ -803,6 +823,8 @@ fn run_inner(
 #[derive(Default)]
 struct Counters {
     encrypted: AtomicU64,
+    recognized: AtomicU64,
+    scans: AtomicU64,
     skipped: AtomicU64,
     empty: AtomicU64,
     truncated: AtomicU64,
@@ -815,6 +837,8 @@ impl Counters {
         match &ex.status {
             Status::Encrypted => self.encrypted.fetch_add(1, Ordering::Relaxed),
             Status::Skipped(_) => self.skipped.fetch_add(1, Ordering::Relaxed),
+            Status::Scan => self.scans.fetch_add(1, Ordering::Relaxed),
+            Status::Recognized => self.recognized.fetch_add(1, Ordering::Relaxed),
             Status::Empty => self.empty.fetch_add(1, Ordering::Relaxed),
             Status::Ok | Status::Failed(_) => 0,
         };
@@ -864,23 +888,29 @@ mod tests {
         let now = 1_700_000_000;
         let b = RETRY_BASE;
         let local = cand("a.pdf", false, 0);
-        assert_eq!(freshness(version_for("pdf"), &local, now, b), Freshness::Fresh);
+        assert_eq!(freshness(version_for("pdf"), &local, now, b, false), Freshness::Fresh);
         assert_eq!(
-            freshness(0, &local, now, b),
+            freshness(0, &local, now, b, false),
             Freshness::Stale,
             "старая отметка «повторить» — перечитываем один раз"
         );
-        assert_eq!(freshness(version_for("pdf") + 100, &local, now, b), Freshness::Stale, "другая версия извлекателя");
+        assert_eq!(
+            freshness(version_for("pdf") + 100, &local, now, b, false),
+            Freshness::Stale,
+            "другая версия извлекателя"
+        );
         // Облачная заглушка: пока файл не скачан, перечитывать нечего; скачали — читаем.
-        assert_eq!(freshness(CLOUD_MARK, &cand("a.pdf", true, 0), now, b), Freshness::Fresh);
-        assert_eq!(freshness(CLOUD_MARK, &local, now, b), Freshness::Stale);
+        assert_eq!(freshness(CLOUD_MARK, &cand("a.pdf", true, 0), now, b, false), Freshness::Fresh);
+        assert_eq!(freshness(CLOUD_MARK, &local, now, b, false), Freshness::Stale);
         // Ошибка чтения: до срока — ждём, после — пробуем снова.
         let mark = retry_mark(1, now - 60, version_for("pdf"));
-        assert_eq!(freshness(mark, &local, now, b), Freshness::Deferred);
-        assert_eq!(freshness(mark, &local, now + b, b), Freshness::Stale);
+        assert_eq!(freshness(mark, &local, now, b, false), Freshness::Deferred);
+        assert_eq!(freshness(mark, &local, now + b, b, false), Freshness::Stale);
+        // Скан, записанный без текста, при включённом распознавании читается заново; при выключенном — нет.
+        assert_eq!(freshness(version_for("pdf"), &local, now, b, true), Freshness::Stale);
         // Разборщик поменяли после неудачи — отсрочка не действует.
         let old_mark = retry_mark(1, now - 60, version_for("pdf") - 1);
-        assert_eq!(freshness(old_mark, &local, now, b), Freshness::Stale);
+        assert_eq!(freshness(old_mark, &local, now, b, false), Freshness::Stale);
     }
 
     #[test]

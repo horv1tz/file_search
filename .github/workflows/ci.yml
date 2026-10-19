@@ -31,6 +31,11 @@ jobs:
         run: cargo test --release
         env:
           RUSTFLAGS: ${{ matrix.rustflags }}
+      - name: OCR (Windows)
+        if: runner.os == 'Windows'
+        run: cargo test --release --lib windows_ocr -- --nocapture
+        env:
+          RUSTFLAGS: ${{ matrix.rustflags }}
       - name: Build
         run: cargo build --release
         env:

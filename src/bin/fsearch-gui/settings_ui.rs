@@ -188,6 +188,20 @@ fn status_section(ui: &mut Ui, app: &mut App, pal: &Palette, actions: &mut Vec<A
                     .color(pal.muted),
             );
         }
+        if s.recognized > 0 {
+            ui.label(
+                RichText::new(format!("Текст распознан на сканах: {} (возможны ошибки)", s.recognized))
+                    .size(12.5)
+                    .color(pal.muted),
+            );
+        }
+        if s.scans > 0 {
+            ui.label(
+                RichText::new(format!("Сканы без распознавания (ищутся только по имени): {}", s.scans))
+                    .size(12.5)
+                    .color(pal.muted),
+            );
+        }
         if s.deferred > 0 {
             ui.label(
                 RichText::new(format!("Не читались в прошлый раз, повторная попытка позже: {}", s.deferred))
@@ -235,7 +249,31 @@ fn status_section(ui: &mut Ui, app: &mut App, pal: &Palette, actions: &mut Vec<A
     }
 }
 
+/// Распознавание текста на сканах: переключатель и пояснение, что есть в системе.
+fn ocr_setting(ui: &mut Ui, app: &mut App, pal: &Palette) {
+    let info = file_search::extract::ocr::engine_info();
+    ui.add_enabled_ui(info.available, |ui| {
+        ui.checkbox(&mut app.settings.ocr, "Распознавать текст на сканах PDF (картинках вместо текста)")
+            .on_hover_text("Медленно: страница занимает около секунды, поэтому первая индексация сканов дольше. Файлы со сканами находятся и без этого, но только по имени.");
+    });
+    if info.available {
+        let languages = if info.languages.is_empty() {
+            String::new()
+        } else {
+            format!(" Языки: {}.", info.languages.join(", "))
+        };
+        ui.label(
+            RichText::new(format!("Распознавание доступно.{languages} Применится при следующем обновлении индекса."))
+                .size(12.5)
+                .color(pal.muted),
+        );
+    } else {
+        ui.label(RichText::new(&info.note).size(12.5).color(pal.warn));
+    }
+}
+
 fn advanced_section(ui: &mut Ui, app: &mut App, actions: &mut Vec<Action>) {
+    let pal = theme::palette(ui.visuals().dark_mode);
     egui::CollapsingHeader::new(RichText::new("Дополнительно").strong().size(16.0)).id_salt("advanced").show(
         ui,
         |ui| {
@@ -250,6 +288,7 @@ fn advanced_section(ui: &mut Ui, app: &mut App, actions: &mut Vec<Action>) {
                 &mut app.settings.default_excludes,
                 "Пропускать служебные папки ($RECYCLE.BIN, .git, node_modules…)",
             );
+            ocr_setting(ui, app, &pal);
             ui.horizontal(|ui| {
                 ui.label("Максимум текста из одного файла, МБ:");
                 ui.add(egui::DragValue::new(&mut app.settings.max_text_mb).range(1..=512));

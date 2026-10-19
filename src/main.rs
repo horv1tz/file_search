@@ -81,6 +81,9 @@ struct ScanArgs {
     /// Работать в фоне: низкий приоритет процессора и диска, чтобы не мешать другим программам
     #[arg(long)]
     low_priority: bool,
+    /// Не распознавать текст на сканах PDF (по умолчанию распознаётся, если в системе есть распознавание)
+    #[arg(long)]
+    no_ocr: bool,
     /// Максимум текста из одного файла, МБ
     #[arg(long, default_value_t = 16, value_name = "МБ")]
     max_text_mb: usize,
@@ -103,8 +106,12 @@ impl ScanArgs {
             opts.background = true;
             file_search::platform::set_low_priority(true);
         }
-        opts.limits =
-            Limits { max_text_bytes: self.max_text_mb.max(1) << 20, max_file_size: self.max_file_mb.max(1) << 20 };
+        opts.limits = Limits {
+            max_text_bytes: self.max_text_mb.max(1) << 20,
+            max_file_size: self.max_file_mb.max(1) << 20,
+            ocr: !self.no_ocr,
+            ..Limits::default()
+        };
         opts
     }
 }
@@ -399,6 +406,12 @@ fn print_summary(s: &Summary, all_errors: bool) {
     println!("  Извлечено текста:          {}", format_size(s.text_bytes));
     if s.encrypted > 0 {
         println!("  Защищены паролем:          {} (индексируются только по имени)", s.encrypted);
+    }
+    if s.recognized > 0 {
+        println!("  Текст распознан на сканах: {} (возможны ошибки)", s.recognized);
+    }
+    if s.scans > 0 {
+        println!("  Сканы без распознавания:   {} (находятся только по имени)", s.scans);
     }
     if s.truncated > 0 {
         println!("  Обрезаны по лимиту текста: {} (см. --max-text-mb)", s.truncated);

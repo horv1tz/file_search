@@ -17,6 +17,10 @@ pub enum Status {
     Encrypted,
     /// Содержимое намеренно не читалось (бинарный, слишком большой, неизвестный формат).
     Skipped(String),
+    /// Скан без текстового слоя, который не распознавался (распознавание выключено или недоступно).
+    Scan,
+    /// Текст получен распознаванием картинок: возможны ошибки.
+    Recognized,
     /// Ошибка разбора; индексируется только имя файла.
     Failed(String),
 }
@@ -28,6 +32,8 @@ impl Status {
             Status::Empty => "empty".into(),
             Status::Encrypted => "encrypted".into(),
             Status::Skipped(r) => format!("skipped: {r}"),
+            Status::Scan => "scan".into(),
+            Status::Recognized => "ocr".into(),
             Status::Failed(e) => format!("error: {e}"),
         }
     }
@@ -43,11 +49,13 @@ pub struct Extracted {
     pub meta: String,
     pub status: Status,
     pub truncated: bool,
+    /// Текст (целиком или частично) получен распознаванием картинок.
+    pub ocr: bool,
 }
 
 impl Extracted {
     pub fn without_content(status: Status) -> Self {
-        Extracted { text: String::new(), units: Vec::new(), meta: String::new(), status, truncated: false }
+        Extracted { text: String::new(), units: Vec::new(), meta: String::new(), status, truncated: false, ocr: false }
     }
 }
 
@@ -62,6 +70,7 @@ pub struct Doc {
     full: bool,
     /// Текст неполный (по нашему лимиту или потому, что источник прочитан не целиком).
     truncated: bool,
+    ocr: bool,
     unit_start: usize,
 }
 
@@ -74,6 +83,7 @@ impl Doc {
             limit,
             full: false,
             truncated: false,
+            ocr: false,
             unit_start: 0,
         }
     }
@@ -105,6 +115,11 @@ impl Doc {
     /// Источник был обрезан ещё до нас (например, прочитана только часть файла).
     pub fn mark_truncated(&mut self) {
         self.truncated = true;
+    }
+
+    /// Часть текста получена распознаванием картинок.
+    pub fn mark_ocr(&mut self) {
+        self.ocr = true;
     }
 
     pub fn push(&mut self, s: &str) {
@@ -180,7 +195,14 @@ impl Doc {
         self.text.truncate(trimmed);
         let has_text = self.text.chars().any(|c| !c.is_whitespace());
         let status = if has_text || !self.meta.is_empty() { Status::Ok } else { Status::Empty };
-        Extracted { text: self.text, units: self.units, meta: self.meta, status, truncated: self.truncated }
+        Extracted {
+            text: self.text,
+            units: self.units,
+            meta: self.meta,
+            status,
+            truncated: self.truncated,
+            ocr: self.ocr,
+        }
     }
 }
 

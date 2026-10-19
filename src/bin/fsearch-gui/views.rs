@@ -578,8 +578,10 @@ fn parent_of(path: &str) -> String {
 fn status_note(status: &str) -> Option<&'static str> {
     if status == "encrypted" {
         Some("Файл защищён паролем — найден только по имени")
-    } else if status.starts_with("skipped: скан") {
-        Some("Скан без текстового слоя — найден только по имени")
+    } else if status == "scan" {
+        Some("Скан без текстового слоя — найден только по имени (включите распознавание в настройках)")
+    } else if status == "ocr" {
+        Some("Скан: текст распознан автоматически, возможны ошибки")
     } else if status == "error" {
         Some("Не удалось прочитать текст — найден только по имени")
     } else {

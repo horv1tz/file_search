@@ -7,11 +7,14 @@
 
 use std::panic::{AssertUnwindSafe, catch_unwind};
 use std::path::Path;
+use std::sync::Arc;
+use std::time::{Duration, Instant};
 
 use anyhow::{Result, anyhow};
 
 use super::doc::Doc;
-use super::{Encrypted, NoTextLayer};
+use super::ocr::{self, Frame, Recognizer};
+use super::{Encrypted, Limits, NoTextLayer, NoTextRecognized};
 
 fn is_password_error(message: &str) -> bool {
     let lower = message.to_lowercase();
@@ -40,23 +43,48 @@ fn primary(path: &Path) -> Result<Vec<String>, String> {
     }
 }
 
-pub fn extract(path: &Path, out: &mut Doc) -> Result<()> {
-    let pages = match primary(path) {
-        Ok(pages) if !is_thin(&pages) => pages,
-        // Текста нет или его слишком мало: второй разборщик иногда читает то, что не прочёл первый.
-        Ok(pages) => match fallback(path) {
-            Ok(second) if letters(&second) > letters(&pages) => second,
-            Err(e) if e.downcast_ref::<Encrypted>().is_some() => return Err(e),
-            _ => pages,
-        },
-        Err(msg) if is_password_error(&msg) => match fallback(path) {
-            // «Пароль» только на права (печать, копирование): файл открывается с пустым паролем.
-            Ok(pages) => pages,
-            Err(_) => return Err(Encrypted.into()),
-        },
-        Err(msg) => fallback(path).map_err(|second| anyhow!("{msg}; запасной разбор: {second}"))?,
+/// Страница, на которой букв меньше, считается «без текста» и отдаётся на распознавание.
+const THIN_PAGE_LETTERS: usize = 20;
+/// Картинка страницы для распознавания: длинная сторона в пикселях (около 190 dpi для листа A4 — для печатного
+/// текста этого достаточно, а на более крупной картинке распознавание заметно медленнее).
+const OCR_TARGET_PX: f32 = 2200.0;
+/// Дольше этого один файл не распознаётся: остальные страницы пропускаются.
+const OCR_MAX_SECONDS: u64 = 180;
+
+pub fn extract(path: &Path, out: &mut Doc, limits: &Limits) -> Result<()> {
+    let recognizer = if limits.ocr { ocr::system_recognizer() } else { None };
+    extract_with(path, out, limits.ocr_max_pages, recognizer)
+}
+
+/// Текст PDF; страницы без текстового слоя при наличии распознавателя читаются распознаванием.
+fn extract_with(path: &Path, out: &mut Doc, ocr_max_pages: usize, recognizer: Option<&Recognizer>) -> Result<()> {
+    let mut read_error = None;
+    let mut pages = match read_text(path) {
+        Ok(pages) => pages,
+        // Файл с паролем распознаванием не открыть; остальные сбои — повод попробовать прочитать картинки.
+        Err(e) if recognizer.is_none() || e.downcast_ref::<Encrypted>().is_some() => return Err(e),
+        Err(e) => {
+            read_error = Some(e);
+            Vec::new()
+        }
     };
+    let mut ocr_tried = false;
+    if is_thin(&pages)
+        && let Some(recognizer) = recognizer
+    {
+        match recognize_pages(path, &mut pages, ocr_max_pages, recognizer, out) {
+            Ok(tried) => ocr_tried = tried,
+            // Распознавание не сработало ни на одной странице: это сбой (его повторят позже), а не пустой скан.
+            Err(why) => return Err(anyhow!("распознавание не удалось: {why}")),
+        }
+    }
     if letters(&pages) < MIN_LETTERS {
+        if ocr_tried {
+            return Err(NoTextRecognized.into());
+        }
+        if let Some(e) = read_error {
+            return Err(e);
+        }
         return Err(if has_images(path) { NoTextLayer.into() } else { anyhow!("в PDF нет текста") });
     }
     for (i, page) in pages.iter().enumerate() {
@@ -73,6 +101,111 @@ pub fn extract(path: &Path, out: &mut Doc) -> Result<()> {
         }
     }
     Ok(())
+}
+
+/// Текстовый слой PDF, постранично (может оказаться скудным или пустым).
+fn read_text(path: &Path) -> Result<Vec<String>> {
+    match primary(path) {
+        Ok(pages) if !is_thin(&pages) => Ok(pages),
+        // Текста нет или его слишком мало: второй разборщик иногда читает то, что не прочёл первый.
+        Ok(pages) => match fallback(path) {
+            Ok(second) if letters(&second) > letters(&pages) => Ok(second),
+            Err(e) if e.downcast_ref::<Encrypted>().is_some() => Err(e),
+            _ => Ok(pages),
+        },
+        // «Пароль» только на права (печать, копирование): файл открывается с пустым паролем.
+        Err(msg) if is_password_error(&msg) => fallback(path).map_err(|_| Encrypted.into()),
+        Err(msg) => fallback(path).map_err(|second| anyhow!("{msg}; запасной разбор: {second}")),
+    }
+}
+
+/// Распознаёт страницы, на которых нет текста, и подставляет результат в `pages`. `Ok(true)` — распознавание
+/// действительно запускалось (чтобы отличить «не распознали» от «не пробовали»); `Err` — оно не удалось
+/// ни на одной из попыток.
+fn recognize_pages(
+    path: &Path,
+    pages: &mut Vec<String>,
+    max_pages: usize,
+    recognizer: &Recognizer,
+    out: &mut Doc,
+) -> Result<bool, String> {
+    let Ok(bytes) = std::fs::read(path) else { return Ok(false) };
+    let Ok(Ok(pdf)) = catch_unwind(AssertUnwindSafe(|| hayro::hayro_syntax::Pdf::new(Arc::new(bytes)))) else {
+        return Ok(false);
+    };
+    let total = pdf.pages().len();
+    if total == 0 {
+        return Ok(false);
+    }
+    if pages.len() < total {
+        pages.resize(total, String::new());
+    }
+    let started = Instant::now();
+    let cache = hayro::RenderCache::new();
+    let mut tried = 0usize;
+    let mut failed = 0usize;
+    let mut last_error = String::new();
+    let mut recognized = false;
+    for (i, page) in pdf.pages().iter().enumerate() {
+        if i >= max_pages || started.elapsed() >= Duration::from_secs(OCR_MAX_SECONDS) {
+            out.mark_truncated();
+            break;
+        }
+        if letters(&pages[i..=i]) >= THIN_PAGE_LETTERS {
+            continue;
+        }
+        let Some((rgba, width, height)) = render_page(page, &cache) else { continue };
+        tried += 1;
+        let text = match recognizer(&Frame { rgba: &rgba, width, height }) {
+            Ok(text) => text,
+            // Сбой на одной странице не лишает файл остальных: страница пропускается.
+            Err(e) => {
+                failed += 1;
+                last_error = format!("{e:#}");
+                continue;
+            }
+        };
+        if letters(std::slice::from_ref(&text)) > letters(&pages[i..=i]) {
+            pages[i] = text;
+            recognized = true;
+        }
+    }
+    if recognized {
+        out.mark_ocr();
+    }
+    if tried > 0 && failed == tried {
+        return Err(last_error);
+    }
+    Ok(tried > 0)
+}
+
+/// Рисует страницу в RGBA на белом фоне. `None` — страницу нарисовать не удалось.
+fn render_page<'a>(
+    page: &'a hayro::hayro_syntax::page::Page<'a>,
+    cache: &hayro::RenderCache<'a>,
+) -> Option<(Vec<u8>, u32, u32)> {
+    let (w, h) = page.render_dimensions();
+    if !(w > 1.0 && h > 1.0) {
+        return None;
+    }
+    let scale = (OCR_TARGET_PX / w.max(h)).clamp(0.5, 4.0);
+    let settings = hayro::PixmapSettings {
+        x_scale: scale,
+        y_scale: scale,
+        bg_color: hayro::vello_cpu::color::palette::css::WHITE,
+    };
+    let pixmap = catch_unwind(AssertUnwindSafe(|| {
+        hayro::render(
+            page,
+            cache,
+            &hayro::hayro_interpret::InterpreterSettings::default(),
+            &hayro::RenderSettings::default(),
+            &settings,
+        )
+    }))
+    .ok()?;
+    let (width, height) = (pixmap.width() as u32, pixmap.height() as u32);
+    (width > 0 && height > 0).then(|| (pixmap.data_as_u8_slice().to_vec(), width, height))
 }
 
 /// Сколько букв в тексте всех страниц (цифры и знаки не считаются).
@@ -198,6 +331,106 @@ mod tests {
         assert!(!doc.is_encrypted() || doc.decrypt("").is_ok());
     }
 
+    /// Распознаватель-пустышка: считает, сколько раз его позвали, и «читает» один и тот же текст.
+    fn fake(text: &'static str, calls: &std::cell::Cell<usize>) -> impl Fn(&Frame) -> Result<String> {
+        move |frame: &Frame| {
+            calls.set(calls.get() + 1);
+            assert!(frame.width > 100 && frame.height > 100, "страница отрисована в нормальный размер");
+            assert_eq!(frame.rgba.len(), (frame.width * frame.height * 4) as usize);
+            Ok(text.to_string())
+        }
+    }
+
+    #[test]
+    fn scan_pages_are_recognized_when_a_recognizer_exists() {
+        let dir = tempfile::tempdir().unwrap();
+        let scan = dir.path().join("scan.pdf");
+        make_pdf(&scan, None);
+        let calls = std::cell::Cell::new(0);
+        let recognizer = fake("СЧЁТ НА ОПЛАТУ Invoice 2026", &calls);
+
+        let mut doc = Doc::new(1 << 20);
+        extract_with(&scan, &mut doc, 30, Some(&recognizer)).unwrap();
+        let e = doc.finish();
+        assert_eq!(calls.get(), 1, "одна страница — один вызов");
+        assert!(e.ocr && e.text.contains("Invoice 2026"), "{e:?}");
+        assert_eq!(e.units, ["Стр. 1"]);
+
+        // Без распознавателя — по-прежнему скан, найденный только по имени.
+        let mut doc = Doc::new(1 << 20);
+        let err = extract_with(&scan, &mut doc, 30, None).unwrap_err();
+        assert!(err.downcast_ref::<NoTextLayer>().is_some(), "{err:#}");
+    }
+
+    #[test]
+    fn pages_with_text_are_not_sent_to_recognition() {
+        let dir = tempfile::tempdir().unwrap();
+        let text = dir.path().join("text.pdf");
+        make_pdf(&text, Some("Quarterly revenue grew by twelve percent this year"));
+        let calls = std::cell::Cell::new(0);
+        let recognizer = fake("лишнее", &calls);
+        let mut doc = Doc::new(1 << 20);
+        extract_with(&text, &mut doc, 30, Some(&recognizer)).unwrap();
+        let e = doc.finish();
+        assert_eq!(calls.get(), 0, "на страницах с текстом распознавание не нужно");
+        assert!(!e.ocr && e.text.contains("Quarterly revenue"));
+    }
+
+    #[test]
+    fn recognition_failures_and_blank_pages_are_reported_honestly() {
+        let dir = tempfile::tempdir().unwrap();
+        let scan = dir.path().join("scan.pdf");
+        make_pdf(&scan, None);
+        // Распознавание ничего не нашло: файл остаётся найденным по имени, но это не «не пробовали».
+        let calls = std::cell::Cell::new(0);
+        let blank = fake("  \n", &calls);
+        let err = extract_with(&scan, &mut Doc::new(1 << 20), 30, Some(&blank)).unwrap_err();
+        assert!(err.downcast_ref::<NoTextRecognized>().is_some(), "{err:#}");
+        // Распознаватель сломан: это сбой (файл будет прочитан позже), а не «пустой скан».
+        let broken = |_: &Frame| -> Result<String> { Err(anyhow!("сбой")) };
+        let err = extract_with(&scan, &mut Doc::new(1 << 20), 30, Some(&broken)).unwrap_err();
+        assert!(err.to_string().contains("распознавание не удалось: сбой"), "{err:#}");
+        // Лимит страниц: ноль страниц — распознавание не запускается, файл помечен обрезанным.
+        let calls = std::cell::Cell::new(0);
+        let recognizer = fake("текст", &calls);
+        let mut doc = Doc::new(1 << 20);
+        let _ = extract_with(&scan, &mut doc, 0, Some(&recognizer));
+        assert_eq!(calls.get(), 0);
+    }
+
+    #[test]
+    fn status_reflects_recognition_through_extract_file() {
+        let dir = tempfile::tempdir().unwrap();
+        let scan = dir.path().join("scan.pdf");
+        make_pdf(&scan, None);
+        let size = std::fs::metadata(&scan).unwrap().len();
+        // Распознавание не запрошено: статус «скан», а не «пропущено».
+        assert_eq!(extract_file(&scan, size, &Limits::default()).status, Status::Scan);
+    }
+
+    /// Только Windows: настоящее встроенное распознавание читает отрисованный текст. Если в системе нет языка
+    /// распознавания (бывает на серверных образах), проверка пропускается с пояснением.
+    #[cfg(windows)]
+    #[test]
+    fn windows_ocr_reads_rendered_text() {
+        let info = ocr::engine_info();
+        if !info.available {
+            eprintln!("пропуск: нет языка распознавания. Доступно: {:?}. {}", info.languages, info.note);
+            return;
+        }
+        eprintln!("распознавание доступно, языки: {:?}", info.languages);
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("invoice.pdf");
+        make_pdf(&path, Some("INVOICE 2026 PAYMENT DUE"));
+        let bytes = std::fs::read(&path).unwrap();
+        let pdf = hayro::hayro_syntax::Pdf::new(Arc::new(bytes)).unwrap();
+        let cache = hayro::RenderCache::new();
+        let (rgba, width, height) = render_page(&pdf.pages()[0], &cache).expect("страница отрисована");
+        let text = ocr::system(&Frame { rgba: &rgba, width, height }).expect("распознавание выполнено");
+        eprintln!("распознано: {text:?}");
+        assert!(text.to_uppercase().contains("INVOICE"), "{text:?}");
+    }
+
     #[test]
     fn thin_text_does_not_hide_a_scan() {
         // Номер страницы вместо текста — это скан, а не «проиндексированный документ».
@@ -230,6 +463,6 @@ mod tests {
         make_pdf(&scan, None);
         assert!(has_images(&scan));
         let e = extract_file(&scan, std::fs::metadata(&scan).unwrap().len(), &Limits::default());
-        assert_eq!(e.status, Status::Skipped("скан без текстового слоя".into()), "{e:?}");
+        assert_eq!(e.status, Status::Scan, "{e:?}");
     }
 }

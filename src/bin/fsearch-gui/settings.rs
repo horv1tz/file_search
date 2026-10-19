@@ -92,6 +92,8 @@ pub struct Settings {
     pub last_update_check: u64,
     /// Версия, которую пользователь просил больше не предлагать.
     pub skipped_version: Option<String>,
+    /// Распознавать текст на сканах (PDF-картинки), если в системе есть распознавание.
+    pub ocr: bool,
     /// Состояние формы поиска на момент выхода.
     pub form: SavedForm,
 }
@@ -113,6 +115,7 @@ impl Default for Settings {
             check_updates: true,
             last_update_check: 0,
             skipped_version: None,
+            ocr: true,
             form: SavedForm::default(),
         }
     }

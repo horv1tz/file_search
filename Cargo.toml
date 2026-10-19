@@ -2,7 +2,7 @@
 name = "file_search"
 version = "0.1.5"
 edition = "2024"
-rust-version = "1.89"
+rust-version = "1.92"
 license = "MIT"
 repository = "https://github.com/horv1tz/file_search"
 readme = "README.md"
@@ -35,6 +35,9 @@ rust-stemmers = "1.2.0"
 serde = { version = "1.0.229", features = ["derive"] }
 serde_json = "1.0.151"
 sha2 = "0.10"
+# Отрисовка страниц PDF в картинку (для распознавания текста на сканах). Чистый Rust, без внешних библиотек;
+# шрифты для отрисовки не встраиваем: на сканах текст — это картинка.
+hayro = { version = "0.8", default-features = false }
 tantivy = "0.26.2"
 tiny_http = "0.12.0"
 walkdir = "2.5.0"
@@ -62,6 +65,17 @@ codegen-units = 4
 [target.'cfg(unix)'.dependencies]
 libc = "0.2"
 
+# Встроенное в Windows распознавание текста (Windows.Media.Ocr): ничего скачивать и устанавливать не нужно.
+[target.'cfg(windows)'.dependencies]
+windows = { version = "0.62", features = [
+    "Media_Ocr",
+    "Graphics_Imaging",
+    "Storage_Streams",
+    "Globalization",
+    "Foundation_Collections",
+    "Win32_System_WinRT",
+] }
+
 # Проверка обновлений. На Windows и macOS шифрование берётся у системы (SChannel / Security.framework): ни лишних
 # библиотек в exe, ни корневых сертификатов, которые устаревают. На остальных системах — rustls.
 [target.'cfg(any(windows, target_os = "macos"))'.dependencies]
@@ -72,6 +86,8 @@ ureq = { version = "3.4", default-features = false, features = ["rustls", "json"
 
 [dev-dependencies]
 tempfile = "3.27.0"
+# В проверках PDF с настоящим текстом отрисовывается в картинку, а для этого нужны встроенные шрифты.
+hayro = { version = "0.8", default-features = false, features = ["embed-fonts"] }
 
 [features]
 default = ["gui"]

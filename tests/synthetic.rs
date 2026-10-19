@@ -242,13 +242,13 @@ fn text_limit_truncates_and_reports_it() {
     let e = extract_file(
         &path,
         fs::metadata(&path).unwrap().len(),
-        &Limits { max_text_bytes: 10_000, max_file_size: 1 << 30 },
+        &Limits { max_text_bytes: 10_000, max_file_size: 1 << 30, ..Limits::default() },
     );
     assert!(e.truncated);
     assert!(e.text.len() <= 10_000);
     assert!(e.text.ends_with("слово") || e.text.ends_with("слов") || e.text.len() > 9_000);
 
-    let too_big = extract_file(&path, 10, &Limits { max_text_bytes: 1000, max_file_size: 5 });
+    let too_big = extract_file(&path, 10, &Limits { max_text_bytes: 1000, max_file_size: 5, ..Limits::default() });
     assert!(matches!(too_big.status, Status::Skipped(_)));
 }
 
