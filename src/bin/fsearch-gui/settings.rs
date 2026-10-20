@@ -96,6 +96,23 @@ pub struct Settings {
     pub ocr: bool,
     /// Состояние формы поиска на момент выхода.
     pub form: SavedForm,
+    /// Недавние запросы, новые первыми (не больше [`HISTORY_MAX`], без повторов).
+    pub history: Vec<String>,
+}
+
+/// Сколько недавних запросов помним.
+pub const HISTORY_MAX: usize = 20;
+
+/// Параметры, после изменения которых нужно перезапустить индексацию (применяются кнопкой «Применить»).
+#[derive(Clone, Debug, PartialEq)]
+pub struct IndexParams {
+    pub load: Load,
+    pub watch: bool,
+    pub ocr: bool,
+    pub default_excludes: bool,
+    pub max_text_mb: usize,
+    pub rescan_minutes: u64,
+    pub excludes: Vec<String>,
 }
 
 impl Default for Settings {
@@ -117,6 +134,7 @@ impl Default for Settings {
             skipped_version: None,
             ocr: true,
             form: SavedForm::default(),
+            history: Vec::new(),
         }
     }
 }
@@ -151,6 +169,42 @@ impl Settings {
         let tmp = path.with_extension("json.tmp");
         fs::write(&tmp, serde_json::to_vec_pretty(self).map_err(std::io::Error::other)?)?;
         fs::rename(&tmp, path)
+    }
+
+    /// Параметры индексации (исключения передаются отдельно: они правятся как текст и попадают сюда уже разобранными).
+    pub fn index_params(&self, excludes: Vec<String>) -> IndexParams {
+        IndexParams {
+            load: self.load,
+            watch: self.watch,
+            ocr: self.ocr,
+            default_excludes: self.default_excludes,
+            max_text_mb: self.max_text_mb,
+            rescan_minutes: self.rescan_minutes,
+            excludes,
+        }
+    }
+
+    /// Возвращает параметры индексации к сохранённым.
+    pub fn set_index_params(&mut self, p: &IndexParams) {
+        self.load = p.load;
+        self.watch = p.watch;
+        self.ocr = p.ocr;
+        self.default_excludes = p.default_excludes;
+        self.max_text_mb = p.max_text_mb;
+        self.rescan_minutes = p.rescan_minutes;
+        self.excludes = p.excludes.clone();
+    }
+
+    /// Запоминает запрос в истории: новые первыми, без повторов (без учёта регистра), не больше [`HISTORY_MAX`].
+    pub fn remember_query(&mut self, query: &str) {
+        let query = query.trim();
+        if query.chars().count() < 2 {
+            return;
+        }
+        let lower = query.to_lowercase();
+        self.history.retain(|q| q.to_lowercase() != lower);
+        self.history.insert(0, query.to_string());
+        self.history.truncate(HISTORY_MAX);
     }
 
     /// Добавляет папку, если её (или содержащей её папки) ещё нет; вложенные в неё убирает.
@@ -234,6 +288,35 @@ mod tests {
         assert_eq!([Load::Minimal, Load::Moderate, Load::Maximum].map(|l| l.threads(8)), [1, 4, 7]);
         assert_eq!([Load::Minimal, Load::Moderate, Load::Maximum].map(|l| l.threads(1)), [1, 1, 1]);
         assert!(Load::Minimal.background() && Load::Moderate.background() && !Load::Maximum.background());
+    }
+
+    #[test]
+    fn history_has_no_duplicates_and_is_capped() {
+        let mut s = Settings::default();
+        s.remember_query("  договор ");
+        s.remember_query("смета");
+        s.remember_query("Договор");
+        s.remember_query("а");
+        assert_eq!(s.history, ["Договор", "смета"], "повтор поднимается наверх, короткие запросы не помним");
+        for i in 0..40 {
+            s.remember_query(&format!("запрос {i}"));
+        }
+        assert_eq!(s.history.len(), HISTORY_MAX);
+        assert_eq!(s.history[0], "запрос 39");
+    }
+
+    #[test]
+    fn index_params_detect_changes_that_need_reindex() {
+        let mut s = Settings::default();
+        let before = s.index_params(vec![]);
+        s.theme = Theme::Dark;
+        s.check_updates = false;
+        assert_eq!(s.index_params(vec![]), before, "тема и обновления не требуют перезапуска индексации");
+        s.ocr = !s.ocr;
+        assert_ne!(s.index_params(vec![]), before);
+        s.set_index_params(&before);
+        assert_eq!(s.index_params(vec![]), before);
+        assert_ne!(s.index_params(vec!["*.tmp".into()]), before);
     }
 
     #[test]

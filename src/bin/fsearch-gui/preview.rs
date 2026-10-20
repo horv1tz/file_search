@@ -5,11 +5,11 @@ use std::sync::mpsc::{Receiver, channel};
 use std::thread;
 
 use egui::text::{LayoutJob, TextFormat};
-use egui::{Align, Color32, Context, FontId, Layout, RichText, ScrollArea, Ui, vec2};
+use egui::{Align, Context, FontId, Layout, RichText, ScrollArea, Ui, vec2};
 use file_search::extract::text::read_for_view;
 use file_search::query::{self, Scope, Text};
 
-use crate::theme::Palette;
+use crate::theme::{self, CONTROL_H, FONT_CAPTION, FONT_MONO, Palette, RADIUS_SM, SPACE_XS};
 
 /// Сколько байт файла показываем. Больше — только начало, с пометкой.
 const MAX_VIEW_BYTES: usize = 4 << 20;
@@ -17,7 +17,6 @@ const MAX_VIEW_BYTES: usize = 4 << 20;
 const MAX_LINE_CHARS: usize = 2000;
 /// Сколько мест с совпадениями запоминаем для кнопок «вперёд / назад».
 const MAX_MATCH_LINES: usize = 5000;
-const FONT_SIZE: f32 = 13.0;
 
 enum State {
     Loading,
@@ -153,20 +152,20 @@ impl Preview {
     }
 
     /// Рисует просмотр в оставшемся месте панели.
-    pub fn show(&mut self, ui: &mut Ui, pal: &Palette, dark: bool) {
+    pub fn show(&mut self, ui: &mut Ui, pal: &Palette) {
         self.poll();
         let terms = &self.terms;
         match &mut self.state {
             State::Loading => {
                 ui.horizontal(|ui| {
                     ui.spinner();
-                    ui.label(RichText::new("Открываю файл…").color(pal.muted));
+                    ui.label(theme::small(pal, "Открываю файл…"));
                 });
             }
             State::Failed(error) => {
-                ui.label(RichText::new(error.as_str()).color(pal.warn));
+                ui.label(RichText::new(error.as_str()).size(theme::FONT_SMALL).color(pal.warn));
             }
-            State::Ready(doc) => doc_view(ui, doc, terms, pal, dark),
+            State::Ready(doc) => doc_view(ui, doc, terms, pal),
         }
     }
 }
@@ -196,8 +195,8 @@ fn match_lines(lines: &[String], terms: &[String]) -> Vec<usize> {
     counts.into_iter().filter(|(_, n)| *n == best).map(|(i, _)| i).take(MAX_MATCH_LINES).collect()
 }
 
-fn doc_view(ui: &mut Ui, doc: &mut Doc, terms: &[String], pal: &Palette, dark: bool) {
-    let font = FontId::monospace(FONT_SIZE);
+fn doc_view(ui: &mut Ui, doc: &mut Doc, terms: &[String], pal: &Palette) {
+    let font = FontId::monospace(FONT_MONO);
     let (row_height, char_width) = ui.fonts_mut(|f| (f.row_height(&font) + 2.0, f.glyph_width(&font, '0')));
     let digits = doc.lines.len().to_string().len().max(3);
 
@@ -214,11 +213,14 @@ fn doc_view(ui: &mut Ui, doc: &mut Doc, terms: &[String], pal: &Palette, dark: b
                 if doc.matches.len() >= MAX_MATCH_LINES { "+" } else { "" }
             )
         };
-        ui.label(RichText::new(info).size(12.0).color(pal.muted));
+        ui.label(theme::small(pal, info));
         if !doc.matches.is_empty() {
             ui.with_layout(Layout::right_to_left(Align::Center), |ui| {
                 let n = doc.matches.len();
-                let arrow = |t: &str| egui::Button::new(RichText::new(t).size(13.0)).min_size(vec2(32.0, 24.0));
+                let arrow = |t: &str| {
+                    egui::Button::new(RichText::new(t).size(theme::FONT_BODY).color(pal.text))
+                        .min_size(vec2(CONTROL_H, CONTROL_H))
+                };
                 if ui.add(arrow("▶")).on_hover_text("Следующее совпадение (F3)").clicked() {
                     doc.current = (doc.current + 1) % n;
                     doc.scroll_to_match = true;
@@ -234,18 +236,18 @@ fn doc_view(ui: &mut Ui, doc: &mut Doc, terms: &[String], pal: &Palette, dark: b
     if doc.truncated {
         ui.label(
             RichText::new(format!("Файл большой: показаны первые {} МБ", MAX_VIEW_BYTES >> 20))
-                .size(12.0)
+                .size(FONT_CAPTION)
                 .color(pal.warn),
         );
     }
-    ui.add_space(4.0);
+    ui.add_space(SPACE_XS);
 
     let content_width = (digits + 2 + doc.longest) as f32 * char_width + 16.0;
     let text_color = ui.visuals().text_color();
     let current_line = doc.matches.get(doc.current).copied();
     let editor_bg = ui.visuals().extreme_bg_color;
-    let gutter_color = if dark { Color32::from_rgb(0x5d, 0x66, 0x78) } else { Color32::from_rgb(0xa0, 0xa8, 0xb8) };
-    let line_hl = if dark { Color32::from_rgb(0x24, 0x2d, 0x42) } else { Color32::from_rgb(0xf3, 0xf6, 0xfc) };
+    let gutter_color = pal.gutter;
+    let line_hl = pal.line_hl;
     let normal = TextFormat { font_id: font.clone(), color: text_color, ..Default::default() };
     let marked =
         TextFormat { font_id: font.clone(), color: pal.mark_fg, background: pal.mark_bg, ..Default::default() };
@@ -258,33 +260,37 @@ fn doc_view(ui: &mut Ui, doc: &mut Doc, terms: &[String], pal: &Palette, dark: b
         // Совпадение показываем чуть ниже верхнего края, чтобы были видны строки перед ним.
         scroll = scroll.vertical_scroll_offset((line as f32 - 3.0).max(0.0) * row_height);
     }
-    egui::Frame::new().fill(editor_bg).corner_radius(8.0).show(ui, |ui| {
-        scroll.show_rows(ui, row_height, doc.lines.len(), |ui, rows| {
-            ui.spacing_mut().item_spacing.y = 0.0;
-            for i in rows {
-                let line = &doc.lines[i];
-                let mut job = LayoutJob::default();
-                job.wrap.max_width = f32::INFINITY;
-                job.append(&format!("{:>digits$}  ", i + 1), 0.0, gutter.clone());
-                let mut pos = 0;
-                for (s, e) in find_marks(line, terms) {
-                    job.append(&line[pos..s], 0.0, normal.clone());
-                    job.append(&line[s..e], 0.0, marked.clone());
-                    pos = e;
+    egui::Frame::new()
+        .fill(editor_bg)
+        .stroke(egui::Stroke::new(theme::LINE_W, pal.line))
+        .corner_radius(theme::radius(RADIUS_SM))
+        .show(ui, |ui| {
+            scroll.show_rows(ui, row_height, doc.lines.len(), |ui, rows| {
+                ui.spacing_mut().item_spacing.y = 0.0;
+                for i in rows {
+                    let line = &doc.lines[i];
+                    let mut job = LayoutJob::default();
+                    job.wrap.max_width = f32::INFINITY;
+                    job.append(&format!("{:>digits$}  ", i + 1), 0.0, gutter.clone());
+                    let mut pos = 0;
+                    for (s, e) in find_marks(line, terms) {
+                        job.append(&line[pos..s], 0.0, normal.clone());
+                        job.append(&line[s..e], 0.0, marked.clone());
+                        pos = e;
+                    }
+                    job.append(&line[pos..], 0.0, normal.clone());
+                    let (rect, _) = ui.allocate_exact_size(
+                        vec2(content_width.max(ui.available_width()), row_height),
+                        egui::Sense::hover(),
+                    );
+                    if current_line == Some(i) {
+                        ui.painter().rect_filled(rect, 0.0, line_hl);
+                    }
+                    let galley = ui.fonts_mut(|f| f.layout_job(job));
+                    ui.painter().galley(rect.min + vec2(6.0, 1.0), galley, text_color);
                 }
-                job.append(&line[pos..], 0.0, normal.clone());
-                let (rect, _) = ui.allocate_exact_size(
-                    vec2(content_width.max(ui.available_width()), row_height),
-                    egui::Sense::hover(),
-                );
-                if current_line == Some(i) {
-                    ui.painter().rect_filled(rect, 0.0, line_hl);
-                }
-                let galley = ui.fonts_mut(|f| f.layout_job(job));
-                ui.painter().galley(rect.min + vec2(6.0, 1.0), galley, text_color);
-            }
+            });
         });
-    });
 }
 
 #[cfg(test)]

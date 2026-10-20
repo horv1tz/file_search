@@ -122,7 +122,7 @@ fn parse_args() -> Launch {
         query: query.join(" "),
         index_dir,
         screenshot: std::env::var_os("FSEARCH_GUI_SCREENSHOT").map(PathBuf::from),
-        open_settings: std::env::var_os("FSEARCH_GUI_SETTINGS").is_some(),
+        open_settings: std::env::var("FSEARCH_GUI_SETTINGS").ok(),
     }
 }
 

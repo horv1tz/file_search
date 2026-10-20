@@ -13,8 +13,9 @@ use file_search::schema::default_index_dir;
 use file_search::search::{Hit, SearchOptions, Sort};
 
 use crate::backend::{Backend, Reply, SearchRequest};
-use crate::settings::{SavedForm, Settings, Theme, settings_path};
-use crate::theme::{self, GROUPS};
+use crate::settings::{IndexParams, SavedForm, Settings, Theme, settings_path};
+use crate::settings_ui::Tab;
+use crate::theme::{self, GROUPS, Kind};
 use crate::updater::{self, Phase, Updater};
 use crate::{settings_ui, views};
 
@@ -28,8 +29,8 @@ pub struct Launch {
     pub query: String,
     pub index_dir: Option<PathBuf>,
     pub screenshot: Option<PathBuf>,
-    /// Только для снимков экрана при проверке: открыть окно настроек.
-    pub open_settings: bool,
+    /// Только для снимков экрана при проверке: открыть окно настроек (значение — имя вкладки, может быть пустым).
+    pub open_settings: Option<String>,
 }
 
 /// Поля формы поиска.
@@ -123,7 +124,17 @@ pub enum Action {
     CopyPath(usize),
     CopyName(usize),
     SearchInFolder(usize),
-    UseExample(String),
+    /// Подставить запрос (пример или из истории) и искать.
+    UseQuery(String),
+    ClearHistory,
+    /// Сбросить фильтры типов, режим и папку.
+    ResetFilters,
+    /// Узкое окно: показать подробности выбранного файла вторым экраном.
+    ShowDetails(usize),
+    BackToList,
+    OpenLogFolder,
+    /// Скопировать текст и показать сообщение с этой подписью.
+    CopyText(String, &'static str),
     AddRoot(PathBuf),
     /// Добавить папку по введённому адресу (например, `\\192.168.1.10\документы`).
     AddRootText(String),
@@ -141,6 +152,9 @@ pub enum Action {
     StopIndexing,
     ClearDirFilter,
     RecreateIndex,
+    /// Спросить подтверждение перед пересозданием индекса / отказаться от него.
+    AskRecreate,
+    CancelRecreate,
     OpenIndexFolder,
     /// Сохранить настройки, не перезапуская индексацию (для параметров, которые на неё не влияют).
     SaveSettings,
@@ -155,6 +169,13 @@ pub enum Action {
     /// Больше не предлагать эту версию.
     SkipUpdateVersion,
     OpenUrl(String),
+}
+
+/// Всплывающее сообщение.
+pub struct Toast {
+    pub text: String,
+    pub kind: Kind,
+    pub since: Instant,
 }
 
 pub struct App {
@@ -193,8 +214,15 @@ pub struct App {
     pub num_docs: u64,
 
     pub show_settings: bool,
+    pub settings_tab: Tab,
+    /// Параметры индексации, как они применены сейчас: от них отсчитываются несохранённые изменения.
+    baseline: IndexParams,
+    /// Узкое окно: вместо списка открыт второй экран с подробностями.
+    pub narrow_details: bool,
+    /// Номер записи истории, подставленной в строку поиска стрелкой вверх.
+    history_pos: Option<usize>,
     pub focus_search: bool,
-    toast: Option<(String, Instant)>,
+    pub toast: Option<Toast>,
     pub places: Vec<(String, PathBuf)>,
     places_rx: Receiver<(String, PathBuf)>,
     dialog_tx: Sender<DialogResult>,
@@ -205,8 +233,8 @@ pub struct App {
     pub net_input: String,
     pub net_error: Option<String>,
     pub net_checking: bool,
-    toast_tx: Sender<String>,
-    toast_rx: Receiver<String>,
+    toast_tx: Sender<(Kind, String)>,
+    toast_rx: Receiver<(Kind, String)>,
     applied_theme: Theme,
     pub excludes_text: String,
     pub confirm_reset: bool,
@@ -310,13 +338,16 @@ impl App {
         let (toast_tx, toast_rx) = channel();
 
         let saved_form = settings.form.clone();
+        let excludes_text = settings.excludes.join("\n");
+        let baseline = settings.index_params(settings.excludes.clone());
         let mut app = App {
             backend,
             backend_error,
             updater: Updater::new(ctx.clone()),
             started: Instant::now(),
             next_update_check: Instant::now() + updater::FIRST_CHECK_AFTER,
-            excludes_text: settings.excludes.join("\n"),
+            excludes_text,
+            baseline,
             settings,
             settings_path,
             index_dir,
@@ -339,7 +370,10 @@ impl App {
             scroll_to_top: false,
             last_generation: 0,
             num_docs: 0,
-            show_settings: launch.open_settings,
+            show_settings: launch.open_settings.is_some(),
+            settings_tab: launch.open_settings.as_deref().and_then(Tab::from_name).unwrap_or_default(),
+            narrow_details: false,
+            history_pos: None,
             focus_search: true,
             toast: None,
             places: Vec::new(),
@@ -380,14 +414,14 @@ impl App {
 
     fn save_settings(&mut self) {
         if let Err(e) = self.settings.save(&self.settings_path) {
-            self.toast(format!("Не удалось сохранить настройки: {e}"));
+            self.toast_err(format!("Не удалось сохранить настройки: {e}"));
         }
     }
 
     /// Применяет настройки: сохраняет и перезапускает индексацию.
     fn apply_settings(&mut self, ctx: &Context, force: bool) {
-        self.settings.excludes =
-            self.excludes_text.lines().map(str::trim).filter(|l| !l.is_empty()).map(str::to_string).collect();
+        self.settings.excludes = self.parsed_excludes();
+        self.baseline = self.settings.index_params(self.settings.excludes.clone());
         theme::apply(ctx, self.settings.theme);
         self.applied_theme = self.settings.theme;
         platform::set_low_priority(self.settings.load.background());
@@ -396,18 +430,45 @@ impl App {
         self.mark_dirty(true);
     }
 
+    fn parsed_excludes(&self) -> Vec<String> {
+        self.excludes_text.lines().map(str::trim).filter(|l| !l.is_empty()).map(str::to_string).collect()
+    }
+
+    /// Есть изменения, которые вступят в силу только после «Применить» (перезапуск индексации).
+    pub fn pending_changes(&self) -> bool {
+        self.settings.index_params(self.parsed_excludes()) != self.baseline
+    }
+
+    /// Возвращает параметры индексации к тем, что сейчас применены.
+    pub fn revert_pending(&mut self) {
+        self.settings.set_index_params(&self.baseline);
+        self.excludes_text = self.baseline.excludes.join("\n");
+    }
+
+    /// Закрывает окно настроек; несохранённые изменения применяются, чтобы ничего не потерялось молча.
+    fn close_settings(&mut self, ctx: &Context) {
+        self.show_settings = false;
+        self.confirm_reset = false;
+        self.confirm_remove = None;
+        self.focus_search = true;
+        if self.pending_changes() {
+            self.apply_settings(ctx, false);
+            self.toast_ok("Настройки применены, индекс обновляется");
+        }
+    }
+
     fn recreate_index(&mut self, ctx: &Context) {
         // Удаляем только каталог, который действительно является индексом программы: путь берётся из настроек,
         // и ошибка в нём не должна стоить пользователю случайной папки.
         let is_index = self.index_dir.join("fsearch.version").exists() || self.index_dir.join("meta.json").exists();
         if !is_index {
-            self.toast(format!("{} не похож на индекс программы — удалять не буду", self.index_dir.display()));
+            self.toast_err(format!("{} не похож на индекс программы — удалять не буду", self.index_dir.display()));
             return;
         }
         if let Some(backend) = &mut self.backend
             && !backend.shutdown()
         {
-            self.toast("Индексация ещё не остановилась — подождите несколько секунд и повторите");
+            self.toast_err("Индексация ещё не остановилась — подождите несколько секунд и повторите");
             return;
         }
         self.backend = None;
@@ -426,7 +487,7 @@ impl App {
                 self.num_docs = 0;
                 self.last_generation = 0;
                 self.start_indexing(true);
-                self.toast("Индекс пересоздан");
+                self.toast_ok("Индекс пересоздан");
             }
             Err(e) => self.backend_error = Some(format!("{e:#}")),
         }
@@ -484,8 +545,8 @@ impl App {
             }
         }
         self.track_indexing();
-        while let Ok(text) = self.toast_rx.try_recv() {
-            self.toast(text);
+        while let Ok((kind, text)) = self.toast_rx.try_recv() {
+            self.toast = Some(Toast { text, kind, since: Instant::now() });
         }
         while let Ok(done) = self.dialog_rx.try_recv() {
             match done {
@@ -561,6 +622,7 @@ impl App {
                                     // Первый результат выбран сразу: Enter открывает его, справа видны подробности.
                                     self.selected = if self.results.is_empty() { None } else { Some(0) };
                                     self.scroll_to_top = true;
+                                    self.narrow_details = false;
                                 }
                                 self.silent_refresh = false;
                             }
@@ -587,8 +649,32 @@ impl App {
 
     // ------------------------------------------------------------ действия
 
+    fn show_toast(&mut self, kind: Kind, text: impl Into<String>) {
+        self.toast = Some(Toast { text: text.into(), kind, since: Instant::now() });
+    }
+
     pub fn toast(&mut self, text: impl Into<String>) {
-        self.toast = Some((text.into(), Instant::now()));
+        self.show_toast(Kind::Info, text);
+    }
+
+    pub fn toast_ok(&mut self, text: impl Into<String>) {
+        self.show_toast(Kind::Success, text);
+    }
+
+    pub fn toast_err(&mut self, text: impl Into<String>) {
+        self.show_toast(Kind::Error, text);
+    }
+
+    /// Запрос, который привёл к результатам, попадает в историю (запоминается при действиях над файлом и при выходе).
+    fn remember_query(&mut self) {
+        if !self.results.is_empty() && !self.pending() {
+            self.settings.remember_query(&self.form.query);
+        }
+    }
+
+    /// Какие фильтры сейчас отличаются от «искать везде» (для кнопки «Сбросить фильтры»).
+    pub fn filters_active(&self) -> bool {
+        self.form.groups.iter().any(|g| *g) || self.form.mode != Mode::All || self.form.dir.is_some()
     }
 
     /// Идёт проход по файлам (первичная индексация, обновление или полная проверка).
@@ -626,7 +712,7 @@ impl App {
                 if s.failed_total > 0 {
                     text.push_str(&format!(", не удалось прочитать — {} (см. настройки)", s.failed_total));
                 }
-                self.toast(text);
+                self.toast_ok(text);
             }
         }
         self.index_was_running = running;
@@ -667,7 +753,7 @@ impl App {
                 result.err().map(|e| open_error_text(&e))
             };
             if let Some(text) = problem {
-                let _ = tx.send(text);
+                let _ = tx.send((Kind::Error, text));
                 ctx.request_repaint();
             }
         });
@@ -694,13 +780,18 @@ impl App {
 
     pub fn handle_action(&mut self, ctx: &Context, action: Action) {
         match action {
-            Action::Select(i) => self.selected = Some(i),
+            Action::Select(i) => {
+                self.selected = Some(i);
+                self.remember_query();
+            }
             Action::Open(i) => {
+                self.remember_query();
                 if let Some(path) = self.hit_path(i) {
                     self.open_in_background(ctx, path, false);
                 }
             }
             Action::Reveal(i) => {
+                self.remember_query();
                 if let Some(path) = self.hit_path(i) {
                     self.open_in_background(ctx, path, true);
                 }
@@ -708,13 +799,13 @@ impl App {
             Action::CopyPath(i) => {
                 if let Some(h) = self.results.get(i) {
                     ctx.copy_text(h.path.clone());
-                    self.toast("Путь скопирован");
+                    self.toast_ok("Путь скопирован");
                 }
             }
             Action::CopyName(i) => {
                 if let Some(h) = self.results.get(i) {
                     ctx.copy_text(h.name.clone());
-                    self.toast("Имя скопировано");
+                    self.toast_ok("Имя скопировано");
                 }
             }
             Action::SearchInFolder(i) => {
@@ -727,15 +818,41 @@ impl App {
                 self.form.dir = None;
                 self.mark_dirty(false);
             }
-            Action::UseExample(text) => {
+            Action::UseQuery(text) => {
                 self.form.query = text;
                 self.focus_search = true;
                 self.mark_dirty(false);
             }
+            Action::ClearHistory => {
+                self.settings.history.clear();
+                self.save_settings();
+            }
+            Action::ResetFilters => {
+                self.form.groups = [false; GROUPS.len()];
+                self.form.mode = Mode::All;
+                self.form.dir = None;
+                self.focus_search = true;
+                self.mark_dirty(false);
+            }
+            Action::ShowDetails(i) => {
+                self.selected = Some(i);
+                self.narrow_details = true;
+            }
+            Action::BackToList => {
+                self.narrow_details = false;
+                self.focus_search = true;
+            }
+            Action::OpenLogFolder => {
+                let _ = platform::open_path(&crate::config_dir());
+            }
+            Action::CopyText(text, label) => {
+                ctx.copy_text(text);
+                self.toast_ok(label);
+            }
             Action::AddRoot(path) => {
                 if self.settings.add_root(path) {
                     self.apply_settings(ctx, false);
-                    self.toast("Папка добавлена, идёт индексация");
+                    self.toast_ok("Папка добавлена, идёт индексация");
                 } else {
                     self.toast("Эта папка уже входит в список");
                 }
@@ -774,11 +891,7 @@ impl App {
                     }
                 }
             }
-            Action::CloseSettings => {
-                self.show_settings = false;
-                self.confirm_reset = false;
-                self.focus_search = true;
-            }
+            Action::CloseSettings => self.close_settings(ctx),
             Action::ApplySettings { force } => self.apply_settings(ctx, force),
             Action::StopIndexing => {
                 if let Some(backend) = &mut self.backend {
@@ -789,6 +902,8 @@ impl App {
                 self.confirm_reset = false;
                 self.recreate_index(ctx);
             }
+            Action::AskRecreate => self.confirm_reset = true,
+            Action::CancelRecreate => self.confirm_reset = false,
             Action::OpenIndexFolder => {
                 let _ = platform::open_path(&self.index_dir);
             }
@@ -861,14 +976,51 @@ impl App {
             self.focus_search = true;
         }
         if self.show_settings && ctx.input_mut(|i| i.consume_key(Modifiers::NONE, Key::Escape)) {
-            self.show_settings = false;
-            self.confirm_reset = false;
-            self.confirm_remove = None;
-            self.focus_search = true;
+            self.close_settings(ctx);
             return actions;
         }
         if typing_elsewhere || self.show_settings || egui::Popup::is_any_open(ctx) {
             return actions;
+        }
+
+        if self.history_pos.is_some_and(|p| self.settings.history.get(p) != Some(&self.form.query)) {
+            self.history_pos = None;
+        }
+        // Ctrl+1…5 — фильтры по типам, Ctrl+0 — сбросить фильтры.
+        const TYPE_KEYS: [Key; 5] = [Key::Num1, Key::Num2, Key::Num3, Key::Num4, Key::Num5];
+        for (i, key) in TYPE_KEYS.iter().enumerate() {
+            if ctx.input_mut(|inp| inp.consume_key(Modifiers::COMMAND, *key)) {
+                self.form.groups[i] = !self.form.groups[i];
+                self.mark_dirty(false);
+            }
+        }
+        if ctx.input_mut(|inp| inp.consume_key(Modifiers::COMMAND, Key::Num0)) {
+            actions.push(Action::ResetFilters);
+        }
+        // Стрелка вверх в пустой строке поиска — прошлые запросы (вниз — обратно).
+        let search_focused = ctx.memory(|m| m.has_focus(search_id));
+        let history_len = self.settings.history.len();
+        let browsing = self.history_pos.is_some();
+        if search_focused && self.results.is_empty() && history_len > 0 && (self.form.query.is_empty() || browsing) {
+            let (up, down) = ctx.input_mut(|inp| {
+                (
+                    inp.consume_key(Modifiers::NONE, Key::ArrowUp),
+                    browsing && inp.consume_key(Modifiers::NONE, Key::ArrowDown),
+                )
+            });
+            let next = match (self.history_pos, up, down) {
+                (None, true, _) => Some(Some(0)),
+                (Some(p), true, _) => Some(Some((p + 1).min(history_len - 1))),
+                (Some(0), _, true) => Some(None),
+                (Some(p), _, true) => Some(Some(p - 1)),
+                _ => None,
+            };
+            if let Some(pos) = next {
+                self.history_pos = pos;
+                self.form.query = pos.map(|p| self.settings.history[p].clone()).unwrap_or_default();
+                self.focus_search = true;
+                self.mark_dirty(false);
+            }
         }
 
         // Ctrl+C копирует путь выбранного файла, если в строке поиска ничего не выделено (иначе — выделенный текст).
@@ -899,6 +1051,8 @@ impl App {
 
         // Стрелки, Enter и Esc обрабатываем до того, как поле ввода успеет забрать их себе.
         let (mut delta, mut reveal, mut open, mut escape) = (0isize, false, false, false);
+        let (home, end) = ctx
+            .input_mut(|i| (i.consume_key(Modifiers::COMMAND, Key::Home), i.consume_key(Modifiers::COMMAND, Key::End)));
         ctx.input_mut(|i| {
             if i.consume_key(Modifiers::NONE, Key::ArrowDown) {
                 delta += 1;
@@ -917,6 +1071,13 @@ impl App {
             escape = i.consume_key(Modifiers::NONE, Key::Escape);
         });
 
+        if (home || end) && !self.results.is_empty() {
+            self.selected = Some(if home { 0 } else { self.results.len() - 1 });
+            self.scroll_to_selected = true;
+            if end {
+                self.load_more();
+            }
+        }
         if delta != 0 && !self.results.is_empty() {
             let last = self.results.len() as isize - 1;
             let next = match self.selected {
@@ -938,7 +1099,10 @@ impl App {
                 actions.push(Action::Open(target));
             }
         }
-        if escape && !self.form.query.is_empty() {
+        if escape && self.narrow_details {
+            self.narrow_details = false;
+        } else if escape && !self.form.query.is_empty() {
+            self.remember_query();
             self.form.query.clear();
             self.mark_dirty(false);
         }
@@ -999,7 +1163,7 @@ impl eframe::App for App {
             if path.is_dir() {
                 actions.push(Action::AddRoot(path));
             } else if let Some(parent) = path.parent() {
-                self.toast(format!("Это файл, а не папка: перетащите папку «{}»", parent.display()));
+                self.toast_err(format!("Это файл, а не папка: перетащите папку «{}»", parent.display()));
             }
         }
 
@@ -1034,6 +1198,7 @@ impl eframe::App for App {
 
     fn on_exit(&mut self, _gl: Option<&eframe::glow::Context>) {
         self.settings.form = self.form.saved();
+        self.remember_query();
         self.save_settings();
         if let Some(backend) = &mut self.backend {
             backend.shutdown();
