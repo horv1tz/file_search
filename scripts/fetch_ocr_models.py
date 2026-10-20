@@ -32,6 +32,10 @@ def sha256(path):
 
 
 def main():
+    # Консоль Windows по умолчанию не умеет печатать русский текст.
+    for stream in (sys.stdout, sys.stderr):
+        if hasattr(stream, "reconfigure"):
+            stream.reconfigure(encoding="utf-8", errors="replace")
     out = os.path.join(os.path.dirname(os.path.abspath(__file__)), "..", "assets", "ocr")
     os.makedirs(out, exist_ok=True)
     for name, (url, expected) in FILES.items():
