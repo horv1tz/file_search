@@ -47,7 +47,6 @@ fn primary(path: &Path) -> Result<Vec<String>, String> {
 const THIN_PAGE_LETTERS: usize = 20;
 /// Картинка страницы для распознавания: длинная сторона в пикселях (около 280 dpi для листа A4 — столько же, сколько
 /// у обычного скана: на меньшем разрешении мелкие буквы сливаются, и ошибок становится много). Не больше, чем
-/// принимает распознавание.
 const OCR_TARGET_PX: f32 = 3300.0;
 /// Дольше этого один файл не распознаётся: остальные страницы пропускаются.
 const OCR_MAX_SECONDS: u64 = 180;
@@ -189,8 +188,7 @@ fn render_page<'a>(
     if !(w > 1.0 && h > 1.0) {
         return None;
     }
-    let target = OCR_TARGET_PX.min(ocr::max_dimension().saturating_sub(40) as f32);
-    let scale = (target / w.max(h)).clamp(0.5, 5.0);
+    let scale = (OCR_TARGET_PX / w.max(h)).clamp(0.5, 5.0);
     let settings = hayro::PixmapSettings {
         x_scale: scale,
         y_scale: scale,
@@ -410,17 +408,63 @@ mod tests {
         assert_eq!(extract_file(&scan, size, &Limits::default()).status, Status::Scan);
     }
 
-    /// Только Windows: настоящее встроенное распознавание читает отрисованный текст. Если в системе нет языка
-    /// распознавания (бывает на серверных образах), проверка пропускается с пояснением.
-    #[cfg(windows)]
+    /// Скан-фотография в PDF: страница из одной JPEG-картинки (как у сканера).
+    fn make_jpeg_scan_pdf(path: &Path, jpeg: &[u8]) {
+        // Размеры картинки лежат в заголовке JPEG (маркер SOF).
+        let (mut i, mut size) = (2usize, (0i64, 0i64));
+        while i + 9 < jpeg.len() {
+            let marker = jpeg[i + 1];
+            let len = u16::from_be_bytes([jpeg[i + 2], jpeg[i + 3]]) as usize;
+            if matches!(marker, 0xC0 | 0xC2) {
+                size = (
+                    u16::from_be_bytes([jpeg[i + 7], jpeg[i + 8]]) as i64,
+                    u16::from_be_bytes([jpeg[i + 5], jpeg[i + 6]]) as i64,
+                );
+                break;
+            }
+            i += 2 + len;
+        }
+        let mut doc = Document::with_version("1.5");
+        let pages_id = doc.new_object_id();
+        let image_id = doc.add_object(Stream::new(
+            dictionary! {
+                "Type" => "XObject", "Subtype" => "Image", "Width" => size.0, "Height" => size.1,
+                "ColorSpace" => "DeviceRGB", "BitsPerComponent" => 8, "Filter" => "DCTDecode",
+            },
+            jpeg.to_vec(),
+        ));
+        let resources_id = doc.add_object(dictionary! { "XObject" => dictionary! { "Im1" => image_id } });
+        // Страница по размеру картинки при 150 dpi.
+        let (w, h) = (size.0 as f32 * 72.0 / 150.0, size.1 as f32 * 72.0 / 150.0);
+        let operations = vec![
+            Operation::new("q", vec![]),
+            Operation::new("cm", vec![w.into(), 0.into(), 0.into(), h.into(), 0.into(), 0.into()]),
+            Operation::new("Do", vec!["Im1".into()]),
+            Operation::new("Q", vec![]),
+        ];
+        let content_id = doc.add_object(Stream::new(dictionary! {}, Content { operations }.encode().unwrap()));
+        let page_id = doc.add_object(dictionary! { "Type" => "Page", "Parent" => pages_id, "Contents" => content_id });
+        doc.objects.insert(
+            pages_id,
+            Object::Dictionary(dictionary! {
+                "Type" => "Pages", "Kids" => vec![page_id.into()], "Count" => 1, "Resources" => resources_id,
+                "MediaBox" => vec![0.into(), 0.into(), w.into(), h.into()],
+            }),
+        );
+        let catalog_id = doc.add_object(dictionary! { "Type" => "Catalog", "Pages" => pages_id });
+        doc.trailer.set("Root", catalog_id);
+        doc.save(path).unwrap();
+    }
+
+    /// Настоящий движок читает отрисованную страницу PDF. Без моделей (обычная сборка без `scripts/fetch_ocr_models.py`)
+    /// проверка пропускается с пояснением.
     #[test]
-    fn windows_ocr_reads_rendered_text() {
+    fn engine_reads_rendered_text() {
         let info = ocr::engine_info();
         if !info.available {
-            eprintln!("пропуск: нет языка распознавания. Доступно: {:?}. {}", info.languages, info.note);
+            eprintln!("пропуск: {}", info.note);
             return;
         }
-        eprintln!("распознавание доступно, языки: {:?}", info.languages);
         let dir = tempfile::tempdir().unwrap();
         let path = dir.path().join("invoice.pdf");
         make_pdf(&path, Some("INVOICE 2026 PAYMENT DUE"));
@@ -429,8 +473,28 @@ mod tests {
         let cache = hayro::RenderCache::new();
         let (rgba, width, height) = render_page(&pdf.pages()[0], &cache).expect("страница отрисована");
         let text = ocr::system(&Frame { rgba: &rgba, width, height }).expect("распознавание выполнено");
-        eprintln!("распознано: {text:?}");
         assert!(text.to_uppercase().contains("INVOICE"), "{text:?}");
+    }
+
+    /// Русский скан-фотография (JPEG качества 60, 150 dpi) проходит весь путь: файл → индексируемый текст.
+    #[test]
+    fn russian_scan_is_read_end_to_end() {
+        let info = ocr::engine_info();
+        if !info.available {
+            eprintln!("пропуск: {}", info.note);
+            return;
+        }
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("spravka.pdf");
+        make_jpeg_scan_pdf(&path, include_bytes!("../../tests/fixtures/scan_spravka.jpg"));
+        let limits = Limits { ocr: true, ..Limits::default() };
+        let e = extract_file(&path, std::fs::metadata(&path).unwrap().len(), &limits);
+        assert_eq!(e.status, Status::Recognized, "{e:?}");
+        let text = e.text.to_lowercase();
+        for word in ["справка", "кузнецову", "инженера-программиста", "двенадцать", "тридцати"]
+        {
+            assert!(text.contains(word), "нет слова «{word}» в распознанном: {}", e.text);
+        }
     }
 
     #[test]

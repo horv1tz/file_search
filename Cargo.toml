@@ -1,6 +1,6 @@
 [package]
 name = "file_search"
-version = "0.1.7"
+version = "0.1.8"
 edition = "2024"
 rust-version = "1.92"
 license = "MIT"
@@ -38,6 +38,9 @@ sha2 = "0.10"
 # Отрисовка страниц PDF в картинку (для распознавания текста на сканах). Чистый Rust, без внешних библиотек;
 # шрифты для отрисовки не встраиваем: на сканах текст — это картинка.
 hayro = { version = "0.8", default-features = false }
+# Собственное распознавание текста: модели PaddleOCR запускает rten (чистый Rust, без C-библиотек и DLL).
+rten = "=0.27.0"
+rten-tensor = "=0.27.0"
 tantivy = "0.26.2"
 tiny_http = "0.12.0"
 walkdir = "2.5.0"
@@ -62,19 +65,28 @@ lto = "thin"
 codegen-units = 4
 # panic = "unwind" (по умолчанию) нужен: повреждённые файлы разбираются под catch_unwind
 
+# Вычисления нейросети в неоптимизированной сборке (cargo test) шли бы минутами: ядро расчётов оптимизируем всегда.
+[profile.dev.package.rten]
+opt-level = 3
+[profile.dev.package.rten-base]
+opt-level = 3
+[profile.dev.package.rten-tensor]
+opt-level = 3
+[profile.dev.package.rten-simd]
+opt-level = 3
+[profile.dev.package.rten-gemm]
+opt-level = 3
+[profile.dev.package.rten-vecmath]
+opt-level = 3
+[profile.dev.package.rten-onnx]
+opt-level = 3
+[profile.dev.package.rten-parallel]
+opt-level = 3
+[profile.dev.package.rten-shape-inference]
+opt-level = 3
+
 [target.'cfg(unix)'.dependencies]
 libc = "0.2"
-
-# Встроенное в Windows распознавание текста (Windows.Media.Ocr): ничего скачивать и устанавливать не нужно.
-[target.'cfg(windows)'.dependencies]
-windows = { version = "0.62", features = [
-    "Media_Ocr",
-    "Graphics_Imaging",
-    "Storage_Streams",
-    "Globalization",
-    "Foundation_Collections",
-    "Win32_System_WinRT",
-] }
 
 # Проверка обновлений. На Windows и macOS шифрование берётся у системы (SChannel / Security.framework): ни лишних
 # библиотек в exe, ни корневых сертификатов, которые устаревают. На остальных системах — rustls.

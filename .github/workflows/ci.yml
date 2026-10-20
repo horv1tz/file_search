@@ -27,13 +27,14 @@ jobs:
       - uses: actions/checkout@v4
       - uses: dtolnay/rust-toolchain@stable
       - uses: Swatinem/rust-cache@v2
+      # Модели распознавания текста (13 МБ) встраиваются в exe; в репозитории их нет.
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.12"
+      - name: Модели распознавания
+        run: python scripts/fetch_ocr_models.py
       - name: Test
         run: cargo test --release
-        env:
-          RUSTFLAGS: ${{ matrix.rustflags }}
-      - name: OCR (Windows)
-        if: runner.os == 'Windows'
-        run: cargo test --release --lib windows_ocr -- --nocapture
         env:
           RUSTFLAGS: ${{ matrix.rustflags }}
       - name: Build

@@ -1,2 +1,5 @@
 /target
 *.swp
+
+# Модели распознавания качает scripts/fetch_ocr_models.py (в репозитории только словарь)
+assets/ocr/*.onnx

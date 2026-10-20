@@ -1,11 +1,12 @@
 //! Распознавание текста на картинках (сканы PDF).
 //!
-//! В Windows используется встроенное распознавание (`Windows.Media.Ocr`): оно не требует установки программ и
-//! работает без интернета, но нуждается в языковом компоненте «Распознавание текста» нужного языка (русский ставится
-//! в Параметры → Время и язык → Язык и регион). На других системах распознавание пока недоступно.
+//! Собственный движок ([`super::ocr_engine`]): модели PaddleOCR (русский и английский) запускает `rten`, чистый Rust.
+//! Он не зависит от языковых пакетов системы и работает одинаково в Windows, Linux и macOS, без интернета.
+//! Модели (около 13 МБ) встраиваются в exe при сборке выпуска; в обычной сборке их можно положить в папку данных
+//! (`<данные>/file_search/ocr/`: `det.onnx`, `rec.onnx`, `dict.txt`).
 //!
-//! Всё, что умеет только система, спрятано за [`Recognizer`]: остальной код (выбор страниц, лимиты, статусы)
-//! от платформы не зависит и проверяется подменой распознавателя.
+//! Всё, что умеет только движок, спрятано за [`Recognizer`]: остальной код (выбор страниц, лимиты, статусы)
+//! проверяется подменой распознавателя.
 
 use std::sync::atomic::{AtomicUsize, Ordering};
 use std::sync::{Condvar, Mutex, OnceLock};
@@ -26,11 +27,11 @@ pub type Recognizer<'a> = dyn Fn(&Frame) -> Result<String> + 'a;
 #[derive(Debug, Clone)]
 pub struct EngineInfo {
     pub available: bool,
-    /// Язык, которым программа читает сканы (как его называет система); пусто, если распознавания нет.
+    /// Языки, которыми программа читает сканы; пусто, если распознавания нет.
     pub language: String,
-    /// Этот язык — русский. Иначе кириллица читается с множеством ошибок: движок другого языка не знает её букв.
+    /// Читает ли движок русский текст (с нашими моделями — да).
     pub russian: bool,
-    /// Языки, для которых в системе есть распознавание (по-русски, как их называет система).
+    /// Языки распознавания по отдельности.
     pub languages: Vec<String>,
     /// Пояснение для пользователя: что делать, если распознавание недоступно.
     pub note: String,
@@ -46,14 +47,9 @@ pub fn available() -> bool {
     engine_info().available
 }
 
-/// Наибольшая сторона картинки, которую принимает распознавание, в пикселях.
-pub fn max_dimension() -> u32 {
-    static MAX: OnceLock<u32> = OnceLock::new();
-    *MAX.get_or_init(backend::max_dimension)
-}
-
-/// Сколько страниц распознаётся одновременно: распознавание занимает процессор, а страницы ещё и отрисовываются.
-const MAX_PARALLEL: usize = 2;
+/// Сколько страниц распознаётся одновременно: одна. Распознавание и так использует несколько потоков, а каждая
+/// одновременная страница добавляет около 100 МБ памяти; компьютер при индексации сканов не должен задыхаться.
+const MAX_PARALLEL: usize = 1;
 /// После стольких неудач подряд распознавание отключается до перезапуска: один сбойный компонент системы не должен
 /// тормозить индексацию остальных файлов.
 const MAX_CONSECUTIVE_FAILURES: usize = 3;
@@ -92,7 +88,7 @@ impl Drop for Permit {
     }
 }
 
-/// Распознавание средствами системы, с ограничением числа одновременных страниц и защитой от серии сбоев.
+/// Распознавание собственным движком, с ограничением числа одновременных страниц и защитой от серии сбоев.
 pub fn system(frame: &Frame) -> Result<String> {
     if FAILURES.load(Ordering::Relaxed) >= MAX_CONSECUTIVE_FAILURES {
         bail!("распознавание отключено до перезапуска после нескольких ошибок подряд");
@@ -110,152 +106,89 @@ pub fn system(frame: &Frame) -> Result<String> {
     }
 }
 
-/// Распознаватель системы, если он есть на этом компьютере.
+/// Распознаватель, если модели найдены.
 pub fn system_recognizer() -> Option<&'static Recognizer<'static>> {
     available().then_some(&system)
 }
 
-#[cfg(windows)]
 mod backend {
-    use std::cell::{Cell, RefCell};
+    use std::path::PathBuf;
+    use std::sync::{Arc, OnceLock};
 
-    use anyhow::{Context, Result, anyhow, bail};
-    use windows::Globalization::Language;
-    use windows::Graphics::Imaging::{BitmapPixelFormat, SoftwareBitmap};
-    use windows::Media::Ocr::OcrEngine;
-    use windows::Storage::Streams::DataWriter;
-    use windows::Win32::System::WinRT::{RO_INIT_MULTITHREADED, RoInitialize};
-    use windows::core::HSTRING;
+    use anyhow::{Result, anyhow};
 
+    use super::super::ocr_engine::{Engine, Options};
     use super::{EngineInfo, Frame};
 
-    /// Каждому потоку нужна «квартира» COM, иначе любой вызов Windows Runtime завершается ошибкой.
-    fn init_apartment() {
-        thread_local! {
-            static DONE: Cell<bool> = const { Cell::new(false) };
-        }
-        DONE.with(|done| {
-            if !done.replace(true) {
-                // Ошибка «уже инициализировано другим режимом» нам не мешает: поток и так в квартире.
-                unsafe {
-                    let _ = RoInitialize(RO_INIT_MULTITHREADED);
-                }
-            }
-        });
+    #[cfg(ocr_embedded)]
+    const DET: &[u8] = include_bytes!("../../assets/ocr/det.onnx");
+    #[cfg(ocr_embedded)]
+    const REC: &[u8] = include_bytes!("../../assets/ocr/rec.onnx");
+    #[cfg(ocr_embedded)]
+    const DICT: &[u8] = include_bytes!("../../assets/ocr/dict.txt");
+
+    /// Папка, где ищутся модели, если они не встроены: `<данные>/file_search/ocr/`.
+    pub fn models_dir() -> PathBuf {
+        dirs::data_local_dir().unwrap_or_else(|| PathBuf::from(".")).join("file_search").join("ocr")
     }
 
-    fn create_engine() -> Result<OcrEngine> {
-        // Сначала русский (он читает и латиницу), иначе — языки профиля пользователя Windows.
-        if let Ok(language) = Language::CreateLanguage(&HSTRING::from("ru"))
-            && let Ok(engine) = OcrEngine::TryCreateFromLanguage(&language)
-        {
-            return Ok(engine);
+    fn load() -> Result<Engine, String> {
+        #[cfg(ocr_embedded)]
+        let engine = Engine::load_with(DET, REC, DICT, Options::default());
+        #[cfg(not(ocr_embedded))]
+        let engine = {
+            let dir = models_dir();
+            let read = |name: &str| {
+                std::fs::read(dir.join(name)).map_err(|e| format!("нет файла {} ({e})", dir.join(name).display()))
+            };
+            let (det, rec, dict) = (read("det.onnx")?, read("rec.onnx")?, read("dict.txt")?);
+            Engine::load_with(&det, &rec, &dict, Options::default())
+        };
+        engine.map_err(|e| format!("не удалось загрузить модели распознавания: {e}"))
+    }
+
+    /// Один движок на процесс: у него свой пул потоков, и модели занимают память.
+    fn engine() -> Result<&'static Arc<Engine>, &'static str> {
+        static ENGINE: OnceLock<Result<Arc<Engine>, String>> = OnceLock::new();
+        ENGINE.get_or_init(|| load().map(Arc::new)).as_ref().map_err(|e| e.as_str())
+    }
+
+    /// Модели на месте (встроены или лежат в папке данных). Сами модели при этом не загружаются: движок занимает
+    /// около 100–250 МБ памяти и поднимается только при первом распознавании.
+    fn models_present() -> bool {
+        if cfg!(ocr_embedded) {
+            return true;
         }
-        OcrEngine::TryCreateFromUserProfileLanguages().map_err(|e| anyhow!("нет языка распознавания: {e}"))
+        let dir = models_dir();
+        ["det.onnx", "rec.onnx", "dict.txt"].iter().all(|f| dir.join(f).is_file())
     }
 
     pub fn info() -> EngineInfo {
-        init_apartment();
-        let languages: Vec<String> = OcrEngine::AvailableRecognizerLanguages()
-            .map(|list| list.into_iter().filter_map(|l| l.DisplayName().ok()).map(|n| n.to_string()).collect())
-            .unwrap_or_default();
-        let engine = create_engine().ok();
-        let available = engine.is_some();
-        let (language, russian) = engine
-            .as_ref()
-            .and_then(|e| e.RecognizerLanguage().ok())
-            .map(|l| {
-                let tag = l.LanguageTag().map(|t| t.to_string()).unwrap_or_default();
-                (
-                    l.DisplayName().map(|n| n.to_string()).unwrap_or_else(|_| tag.clone()),
-                    tag.to_lowercase().starts_with("ru"),
-                )
-            })
-            .unwrap_or_default();
-        let note = if !available {
-            "В Windows не установлен язык распознавания текста. Добавьте русский язык: Параметры → Время и язык → \
-             Язык и регион → Добавить язык (достаточно компонента «Распознавание текста»), затем перезапустите программу."
-                .to_string()
-        } else if !russian {
-            format!(
-                "Русский язык распознавания не установлен: сейчас сканы читаются как «{language}», и русский текст будет \
-                 с множеством ошибок. Добавьте русский язык: Параметры → Время и язык → Язык и регион → Добавить язык \
-                 (достаточно компонента «Распознавание текста»), затем перезапустите программу."
-            )
+        if models_present() {
+            EngineInfo {
+                available: true,
+                language: "русский и английский".to_string(),
+                russian: true,
+                languages: vec!["русский".to_string(), "английский".to_string()],
+                note: String::new(),
+            }
         } else {
-            String::new()
-        };
-        EngineInfo { available, language, russian, languages, note }
-    }
-
-    pub fn max_dimension() -> u32 {
-        init_apartment();
-        OcrEngine::MaxImageDimension().unwrap_or(2600)
+            EngineInfo {
+                available: false,
+                language: String::new(),
+                russian: false,
+                languages: Vec::new(),
+                note: format!(
+                    "Модели распознавания не найдены. Скачайте выпуск программы со встроенными моделями или положите \
+                     файлы det.onnx, rec.onnx и dict.txt в папку {}.",
+                    models_dir().display()
+                ),
+            }
+        }
     }
 
     pub fn recognize(frame: &Frame) -> Result<String> {
-        init_apartment();
-        thread_local! {
-            static ENGINE: RefCell<Option<OcrEngine>> = const { RefCell::new(None) };
-        }
-        ENGINE.with(|slot| {
-            let mut slot = slot.borrow_mut();
-            if slot.is_none() {
-                *slot = Some(create_engine()?);
-            }
-            let engine = slot.as_ref().expect("движок создан выше");
-            let max = OcrEngine::MaxImageDimension().unwrap_or(2600);
-            if frame.width > max || frame.height > max {
-                bail!("страница {}×{} больше предела распознавания ({max})", frame.width, frame.height);
-            }
-            // Windows ждёт порядок каналов BGRA.
-            let mut bgra = frame.rgba.to_vec();
-            for px in bgra.chunks_exact_mut(4) {
-                px.swap(0, 2);
-            }
-            let writer = DataWriter::new().context("буфер картинки")?;
-            writer.WriteBytes(&bgra).context("запись картинки")?;
-            let buffer = writer.DetachBuffer().context("буфер картинки")?;
-            let bitmap = SoftwareBitmap::CreateCopyFromBuffer(
-                &buffer,
-                BitmapPixelFormat::Bgra8,
-                frame.width as i32,
-                frame.height as i32,
-            )
-            .context("картинка для распознавания")?;
-            let result =
-                engine.RecognizeAsync(&bitmap).context("запуск распознавания")?.join().context("распознавание")?;
-            let mut text = String::new();
-            for line in result.Lines().context("строки текста")? {
-                text.push_str(&line.Text().context("текст строки")?.to_string());
-                text.push('\n');
-            }
-            Ok(text)
-        })
-    }
-}
-
-#[cfg(not(windows))]
-mod backend {
-    use anyhow::{Result, bail};
-
-    use super::{EngineInfo, Frame};
-
-    pub fn info() -> EngineInfo {
-        EngineInfo {
-            available: false,
-            language: String::new(),
-            russian: false,
-            languages: Vec::new(),
-            note: "Распознавание текста на сканах пока работает только в Windows.".to_string(),
-        }
-    }
-
-    pub fn max_dimension() -> u32 {
-        2600
-    }
-
-    pub fn recognize(_frame: &Frame) -> Result<String> {
-        bail!("распознавание текста недоступно на этой системе")
+        let engine = engine().map_err(|e| anyhow!("{e}"))?;
+        Ok(engine.recognize(frame.rgba, frame.width, frame.height)?)
     }
 }

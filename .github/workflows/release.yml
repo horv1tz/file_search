@@ -50,6 +50,13 @@ jobs:
         with:
           key: release-${{ matrix.name }}
 
+      # Модели распознавания текста (13 МБ) встраиваются в exe; в репозитории их нет.
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.12"
+      - name: Модели распознавания
+        run: python scripts/fetch_ocr_models.py
+
       - name: Тесты
         run: cargo test --release
         env:

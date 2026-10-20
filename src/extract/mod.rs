@@ -3,6 +3,7 @@
 pub mod doc;
 pub mod legacy;
 pub mod ocr;
+pub mod ocr_engine;
 pub mod odf;
 pub mod ooxml;
 pub mod pdf;
