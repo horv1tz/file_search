@@ -760,13 +760,16 @@ impl App {
     }
 
     /// Выбранный результат можно показать как текст (обычный текстовый файл).
-    pub fn selected_is_text(&self) -> bool {
-        self.selected.and_then(|i| self.results.get(i)).is_some_and(|hit| file_search::extract::is_text_ext(&hit.ext))
+    /// У выбранного файла есть предпросмотр (текст, документ, картинка или PDF).
+    pub fn selected_has_preview(&self) -> bool {
+        self.selected
+            .and_then(|i| self.results.get(i))
+            .is_some_and(|hit| crate::preview::Kind::from_ext(&hit.ext) != crate::preview::Kind::Other)
     }
 
     /// Держит просмотр в соответствии с выбранным файлом и текущим запросом.
     pub fn sync_preview(&mut self, ctx: &Context) {
-        let wanted = if self.selected_is_text() {
+        let wanted = if self.selected_has_preview() {
             self.selected.and_then(|i| self.results.get(i)).map(|hit| PathBuf::from(&hit.path))
         } else {
             None

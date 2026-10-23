@@ -154,7 +154,7 @@ fn recognize_pages(
         if letters(&pages[i..=i]) >= THIN_PAGE_LETTERS {
             continue;
         }
-        let Some((rgba, width, height)) = render_page(page, &cache) else { continue };
+        let Some((rgba, width, height)) = render_page(page, &cache, OCR_TARGET_PX) else { continue };
         tried += 1;
         let text = match recognizer(&Frame { rgba: &rgba, width, height }) {
             Ok(text) => text,
@@ -179,16 +179,17 @@ fn recognize_pages(
     Ok(tried > 0)
 }
 
-/// Рисует страницу в RGBA на белом фоне. `None` — страницу нарисовать не удалось.
+/// Рисует страницу в RGBA на белом фоне; `target_px` — размер её большей стороны. `None` — не удалось.
 fn render_page<'a>(
     page: &'a hayro::hayro_syntax::page::Page<'a>,
     cache: &hayro::RenderCache<'a>,
+    target_px: f32,
 ) -> Option<(Vec<u8>, u32, u32)> {
     let (w, h) = page.render_dimensions();
     if !(w > 1.0 && h > 1.0) {
         return None;
     }
-    let scale = (OCR_TARGET_PX / w.max(h)).clamp(0.5, 5.0);
+    let scale = (target_px / w.max(h)).clamp(0.5, 5.0);
     let settings = hayro::PixmapSettings {
         x_scale: scale,
         y_scale: scale,
@@ -206,6 +207,44 @@ fn render_page<'a>(
     .ok()?;
     let (width, height) = (pixmap.width() as u32, pixmap.height() as u32);
     (width > 0 && height > 0).then(|| (pixmap.data_as_u8_slice().to_vec(), width, height))
+}
+
+/// Страница PDF, нарисованная для показа: RGBA, белый фон.
+pub struct PageImage {
+    pub rgba: Vec<u8>,
+    pub width: u32,
+    pub height: u32,
+}
+
+/// Открытый PDF для просмотра страниц. Файл разбирается один раз, страницы рисуются по требованию.
+pub struct Pages {
+    pdf: hayro::hayro_syntax::Pdf,
+}
+
+impl Pages {
+    pub fn open(path: &Path) -> Result<Pages> {
+        let bytes = std::fs::read(path)?;
+        let parsed = catch_unwind(AssertUnwindSafe(|| hayro::hayro_syntax::Pdf::new(Arc::new(bytes))));
+        match parsed {
+            Ok(Ok(pdf)) => Ok(Pages { pdf }),
+            _ => Err(anyhow!("PDF не удалось открыть: файл повреждён или защищён паролем")),
+        }
+    }
+
+    pub fn count(&self) -> usize {
+        self.pdf.pages().len()
+    }
+
+    /// Страница с номером `index` (с нуля), большая сторона — около `target_px` пикселей.
+    pub fn render(&self, index: usize, target_px: f32) -> Option<PageImage> {
+        if index >= self.count() {
+            return None;
+        }
+        let page = &self.pdf.pages()[index];
+        let cache = hayro::RenderCache::new();
+        let (rgba, width, height) = catch_unwind(AssertUnwindSafe(|| render_page(page, &cache, target_px))).ok()??;
+        Some(PageImage { rgba, width, height })
+    }
 }
 
 /// Сколько букв в тексте всех страниц (цифры и знаки не считаются).
@@ -471,7 +510,7 @@ mod tests {
         let bytes = std::fs::read(&path).unwrap();
         let pdf = hayro::hayro_syntax::Pdf::new(Arc::new(bytes)).unwrap();
         let cache = hayro::RenderCache::new();
-        let (rgba, width, height) = render_page(&pdf.pages()[0], &cache).expect("страница отрисована");
+        let (rgba, width, height) = render_page(&pdf.pages()[0], &cache, OCR_TARGET_PX).expect("страница отрисована");
         let text = ocr::system(&Frame { rgba: &rgba, width, height }).expect("распознавание выполнено");
         assert!(text.to_uppercase().contains("INVOICE"), "{text:?}");
     }
@@ -495,6 +534,21 @@ mod tests {
         {
             assert!(text.contains(word), "нет слова «{word}» в распознанном: {}", e.text);
         }
+    }
+
+    #[test]
+    fn pages_render_for_preview_with_requested_size() {
+        let dir = std::env::temp_dir().join(format!("fsearch-pages-{}", std::process::id()));
+        std::fs::create_dir_all(&dir).unwrap();
+        let path = dir.join("scan.pdf");
+        make_jpeg_scan_pdf(&path, include_bytes!("../../tests/fixtures/scan_spravka.jpg"));
+        let pages = Pages::open(&path).expect("PDF открыт");
+        assert_eq!(pages.count(), 1);
+        let page = pages.render(0, 600.0).expect("страница отрисована");
+        assert_eq!(page.rgba.len(), (page.width * page.height * 4) as usize);
+        assert_eq!(page.width.max(page.height), 600);
+        assert!(pages.render(1, 600.0).is_none());
+        let _ = std::fs::remove_dir_all(&dir);
     }
 
     #[test]
