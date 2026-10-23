@@ -28,8 +28,10 @@ mod search;
 pub use actions::Action;
 use actions::DialogResult;
 pub use form::Form;
+use index::IndexStatus;
 use index::discover_places;
 use keys::ScreenshotPlan;
+use search::SearchState;
 
 const DEBOUNCE: Duration = Duration::from_millis(120);
 
@@ -55,8 +57,6 @@ pub struct Toast {
 }
 
 pub struct App {
-    pub backend: Option<Backend>,
-    pub backend_error: Option<String>,
     pub settings: Settings,
     pub updater: Updater,
     started: Instant,
@@ -65,29 +65,12 @@ pub struct App {
     settings_path: PathBuf,
     pub index_dir: PathBuf,
 
-    pub form: Form,
-    next_id: u64,
-    current_id: u64,
-    pub results: Vec<Hit>,
-    pub total: usize,
-    pub took_ms: f64,
-    pub searching: bool,
-    loading_more: bool,
-    pub search_error: Option<String>,
-    dirty_at: Option<Instant>,
     /// Повторный запрос из-за обновления индекса: список не должен «прыгать» наверх.
-    silent_refresh: bool,
-    pub selected: Option<usize>,
     /// Просмотр содержимого выбранного текстового файла.
     pub preview: Option<crate::preview::Preview>,
     /// Сколько файлов в каждой группе типов (по порядку `theme::GROUPS`) для текущего запроса.
-    pub facets: Option<Vec<usize>>,
     /// Справа сейчас показана панель подробностей (карточки тогда не дублируют кнопки).
     pub details_visible: bool,
-    pub scroll_to_selected: bool,
-    pub scroll_to_top: bool,
-    last_generation: u64,
-    pub num_docs: u64,
 
     pub show_settings: bool,
     pub settings_tab: Tab,
@@ -96,7 +79,6 @@ pub struct App {
     /// Узкое окно: вместо списка открыт второй экран с подробностями.
     pub narrow_details: bool,
     /// Номер записи истории, подставленной в строку поиска стрелкой вверх.
-    history_pos: Option<usize>,
     pub focus_search: bool,
     pub toast: Option<Toast>,
     pub places: Vec<(String, PathBuf)>,
@@ -117,12 +99,10 @@ pub struct App {
     /// Номер папки в списке «Где искать», удаление которой ждёт подтверждения.
     pub confirm_remove: Option<usize>,
     /// Шла ли индексация в прошлом кадре: по её окончании показываем итог.
-    index_was_running: bool,
     /// Отметка для оценки оставшегося времени: (когда, сколько было готово).
-    index_mark: Option<(Instant, u64)>,
-    pub index_eta_secs: Option<u64>,
-
     screenshot: Option<ScreenshotPlan>,
+    pub search: SearchState,
+    pub index: IndexStatus,
 }
 
 pub(super) fn open_error_text(e: &std::io::Error) -> String {
@@ -159,10 +139,10 @@ impl eframe::App for App {
         }
 
         // Набранный запрос уходит в поиск после короткой паузы.
-        if let Some(at) = self.dirty_at {
+        if let Some(at) = self.search.dirty_at {
             let wait = DEBOUNCE.saturating_sub(at.elapsed());
             if wait.is_zero() {
-                self.dirty_at = None;
+                self.search.dirty_at = None;
                 self.dispatch_search(false);
             } else {
                 ctx.request_repaint_after(wait);
@@ -178,7 +158,7 @@ impl eframe::App for App {
             self.handle_action(ctx, action);
         }
 
-        if let Some(backend) = &self.backend
+        if let Some(backend) = &self.index.backend
             && backend.state.running.load(Ordering::Relaxed)
         {
             // Полоса прогресса не требует частой перерисовки: так окно почти не грузит процессор.
@@ -188,10 +168,10 @@ impl eframe::App for App {
     }
 
     fn on_exit(&mut self, _gl: Option<&eframe::glow::Context>) {
-        self.settings.form = self.form.saved();
+        self.settings.form = self.search.form.saved();
         self.remember_query();
         self.save_settings();
-        if let Some(backend) = &mut self.backend {
+        if let Some(backend) = &mut self.index.backend {
             backend.shutdown();
         }
     }
@@ -225,8 +205,6 @@ impl App {
         let excludes_text = settings.excludes.join("\n");
         let baseline = settings.index_params(settings.excludes.clone());
         let mut app = App {
-            backend,
-            backend_error,
             updater: Updater::new(ctx.clone()),
             started: Instant::now(),
             next_update_check: Instant::now() + updater::FIRST_CHECK_AFTER,
@@ -235,29 +213,11 @@ impl App {
             settings,
             settings_path,
             index_dir,
-            form: Form::restored(launch.query.clone(), &saved_form),
-            next_id: 0,
-            current_id: 0,
-            results: Vec::new(),
-            total: 0,
-            took_ms: 0.0,
-            searching: false,
-            loading_more: false,
-            search_error: None,
-            dirty_at: (!launch.query.is_empty()).then(Instant::now),
-            silent_refresh: false,
-            selected: None,
             preview: None,
-            facets: None,
             details_visible: false,
-            scroll_to_selected: false,
-            scroll_to_top: false,
-            last_generation: 0,
-            num_docs: 0,
             show_settings: launch.open_settings.is_some(),
             settings_tab: launch.open_settings.as_deref().and_then(Tab::from_name).unwrap_or_default(),
             narrow_details: false,
-            history_pos: None,
             focus_search: true,
             toast: None,
             places: Vec::new(),
@@ -273,14 +233,38 @@ impl App {
             applied_theme: settings_theme,
             confirm_reset: false,
             confirm_remove: None,
-            index_was_running: false,
-            index_mark: None,
-            index_eta_secs: None,
             screenshot: launch.screenshot.map(|path| ScreenshotPlan {
                 path,
                 requested: false,
                 started: Instant::now(),
             }),
+            search: SearchState {
+                form: Form::restored(launch.query.clone(), &saved_form),
+                next_id: 0,
+                current_id: 0,
+                results: Vec::new(),
+                total: 0,
+                took_ms: 0.0,
+                searching: false,
+                loading_more: false,
+                search_error: None,
+                dirty_at: (!launch.query.is_empty()).then(Instant::now),
+                silent_refresh: false,
+                selected: None,
+                facets: None,
+                scroll_to_selected: false,
+                scroll_to_top: false,
+                last_generation: 0,
+                history_pos: None,
+            },
+            index: IndexStatus {
+                backend,
+                backend_error,
+                num_docs: 0,
+                index_was_running: false,
+                index_mark: None,
+                index_eta_secs: None,
+            },
         };
         if !app.settings.roots.is_empty() || !app.settings.pending_removals.is_empty() {
             app.start_indexing(false);

@@ -14,17 +14,17 @@ pub(super) fn status_dot(ui: &mut Ui, color: Color32) {
 pub(super) fn status_bar(ui: &mut Ui, app: &App, pal: &Palette, actions: &mut Vec<Action>) {
     ui.horizontal(|ui| {
         ui.set_min_height(24.0);
-        let (left, left_color) = if app.search_error.is_some() && !app.form.is_empty() {
+        let (left, left_color) = if app.search.search_error.is_some() && !app.search.form.is_empty() {
             ("Ошибка поиска".to_string(), pal.danger)
-        } else if app.num_docs > 0 {
-            (format!("Файлов в индексе: {}", thousands(app.num_docs)), pal.muted)
+        } else if app.index.num_docs > 0 {
+            (format!("Файлов в индексе: {}", thousands(app.index.num_docs)), pal.muted)
         } else {
             (String::new(), pal.muted)
         };
         ui.label(RichText::new(left).size(FONT_CAPTION).color(left_color));
 
         ui.with_layout(Layout::right_to_left(Align::Center), |ui| {
-            let Some(backend) = &app.backend else { return };
+            let Some(backend) = &app.index.backend else { return };
             let st = &backend.state;
             let caption = |text: String, color: Color32| RichText::new(text).size(FONT_CAPTION).color(color);
             if let Some(error) = st.error.lock().unwrap().as_ref() {
@@ -37,7 +37,7 @@ pub(super) fn status_bar(ui: &mut Ui, app: &App, pal: &Palette, actions: &mut Ve
                 ui.horizontal(|ui| {
                     if total > 0 && phase == "Индексация" {
                         let frac = (done as f32 / total as f32).clamp(0.0, 1.0);
-                        let eta = match app.index_eta_secs {
+                        let eta = match app.index.index_eta_secs {
                             Some(secs) if secs >= 90 => format!(" · осталось ~{} мин", secs.div_ceil(60)),
                             Some(_) => " · почти готово".to_string(),
                             None => String::new(),

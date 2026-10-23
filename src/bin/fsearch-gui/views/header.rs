@@ -60,7 +60,7 @@ pub(super) fn header(ui: &mut Ui, app: &mut App, pal: &Palette, actions: &mut Ve
                 ui.horizontal_centered(|ui| {
                     magnifier(ui, if focused { pal.accent } else { pal.muted });
                     let side = CONTROL_H + SPACE_XS;
-                    let output = TextEdit::singleline(&mut app.form.query)
+                    let output = TextEdit::singleline(&mut app.search.form.query)
                         .id(search_id)
                         .frame(false)
                         .hint_text(RichText::new("Имя файла или слова из содержимого…").color(pal.muted))
@@ -87,18 +87,18 @@ pub(super) fn header(ui: &mut Ui, app: &mut App, pal: &Palette, actions: &mut Ve
                         output.response.request_focus();
                         // При Ctrl+F выделяем весь запрос, чтобы его можно было сразу заменить.
                         let mut state = output.state.clone();
-                        let end = app.form.query.chars().count();
+                        let end = app.search.form.query.chars().count();
                         state.cursor.set_char_range(Some(CCursorRange::two(CCursor::new(0), CCursor::new(end))));
                         state.store(ui.ctx(), output.response.id);
                         app.focus_search = false;
                     }
                     changed |= output.response.changed();
-                    if app.searching {
+                    if app.search.searching {
                         ui.add_sized([CONTROL_H, CONTROL_H], egui::Spinner::new().size(18.0));
-                    } else if !app.form.query.is_empty()
+                    } else if !app.search.form.query.is_empty()
                         && theme::close_button(ui, pal).on_hover_text("Очистить (Esc)").clicked()
                     {
-                        app.form.query.clear();
+                        app.search.form.query.clear();
                         changed = true;
                         app.focus_search = true;
                     }
@@ -110,7 +110,7 @@ pub(super) fn header(ui: &mut Ui, app: &mut App, pal: &Palette, actions: &mut Ve
         }
     });
     // Пока папки не выбраны, фильтровать нечего: остаётся одна строка поиска.
-    if app.settings.roots.is_empty() && app.num_docs == 0 {
+    if app.settings.roots.is_empty() && app.index.num_docs == 0 {
         if changed {
             app.mark_dirty(false);
         }
@@ -135,8 +135,8 @@ pub(super) fn header(ui: &mut Ui, app: &mut App, pal: &Palette, actions: &mut Ve
 /// Фильтры по типам файлов.
 pub(super) fn filter_pills(ui: &mut Ui, app: &mut App, pal: &Palette, changed: &mut bool) {
     for (i, (name, _)) in GROUPS.iter().enumerate() {
-        let on = app.form.groups[i];
-        let count = app.facets.as_ref().and_then(|f| f.get(i)).filter(|_| !app.form.is_empty());
+        let on = app.search.form.groups[i];
+        let count = app.search.facets.as_ref().and_then(|f| f.get(i)).filter(|_| !app.search.form.is_empty());
         let text = match count {
             Some(n) => format!("{name}  {n}"),
             None => (*name).to_string(),
@@ -149,7 +149,7 @@ pub(super) fn filter_pills(ui: &mut Ui, app: &mut App, pal: &Palette, changed: &
             .on_hover_text(format!("Только {name} (Ctrl+{})", i + 1))
             .clicked()
         {
-            app.form.groups[i] = !on;
+            app.search.form.groups[i] = !on;
             *changed = true;
         }
     }
@@ -163,17 +163,17 @@ pub(super) fn filter_controls(
     actions: &mut Vec<Action>,
     changed: &mut bool,
 ) {
-    ComboBox::from_id_salt("mode").width(150.0).selected_text(mode_label(app.form.mode)).show_ui(ui, |ui| {
+    ComboBox::from_id_salt("mode").width(150.0).selected_text(mode_label(app.search.form.mode)).show_ui(ui, |ui| {
         for m in [Mode::All, Mode::Name, Mode::Content] {
-            *changed |= ui.selectable_value(&mut app.form.mode, m, mode_label(m)).changed();
+            *changed |= ui.selectable_value(&mut app.search.form.mode, m, mode_label(m)).changed();
         }
     });
-    ComboBox::from_id_salt("sort").width(170.0).selected_text(sort_label(app.form.sort)).show_ui(ui, |ui| {
+    ComboBox::from_id_salt("sort").width(170.0).selected_text(sort_label(app.search.form.sort)).show_ui(ui, |ui| {
         for s in [Sort::Relevance, Sort::Newest, Sort::Oldest, Sort::Largest, Sort::Smallest] {
-            *changed |= ui.selectable_value(&mut app.form.sort, s, sort_label(s)).changed();
+            *changed |= ui.selectable_value(&mut app.search.form.sort, s, sort_label(s)).changed();
         }
     });
-    match &app.form.dir {
+    match &app.search.form.dir {
         Some(dir) => {
             let name = std::path::Path::new(dir)
                 .file_name()

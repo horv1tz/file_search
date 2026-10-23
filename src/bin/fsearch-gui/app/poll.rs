@@ -26,7 +26,7 @@ impl App {
             match done {
                 DialogResult::Root(path) => self.handle_action(ctx, Action::AddRoot(path)),
                 DialogResult::FilterFolder(path) => {
-                    self.form.dir = Some(path.to_string_lossy().into_owned());
+                    self.search.form.dir = Some(path.to_string_lossy().into_owned());
                     self.mark_dirty(false);
                 }
                 DialogResult::Closed => {
@@ -55,6 +55,7 @@ impl App {
         }
         // Папки, записи которых уже удалены из индекса, больше не нужно помнить.
         let removed_done: Vec<PathBuf> = self
+            .index
             .backend
             .as_ref()
             .map(|b| std::mem::take(&mut *b.state.removed_done.lock().unwrap()))
@@ -63,48 +64,49 @@ impl App {
             self.settings.pending_removals.retain(|r| !removed_done.contains(r));
             self.save_settings();
         }
-        let Some(backend) = &self.backend else { return };
+        let Some(backend) = &self.index.backend else { return };
         while let Ok(reply) = backend.replies.try_recv() {
             match reply {
-                Reply::Count(n) => self.num_docs = n,
+                Reply::Count(n) => self.index.num_docs = n,
                 Reply::Facets { id, counts } => {
-                    if id == self.current_id {
-                        self.facets = Some(counts);
+                    if id == self.search.current_id {
+                        self.search.facets = Some(counts);
                     }
                 }
                 Reply::Search(resp) => {
-                    if resp.id != self.current_id {
+                    if resp.id != self.search.current_id {
                         continue;
                     }
                     if resp.append {
-                        self.loading_more = false;
+                        self.search.loading_more = false;
                     } else {
-                        self.searching = false;
+                        self.search.searching = false;
                     }
                     match resp.result {
                         Ok(result) => {
-                            self.search_error = None;
-                            self.total = result.total;
-                            self.took_ms = result.took.as_secs_f64() * 1000.0;
+                            self.search.search_error = None;
+                            self.search.total = result.total;
+                            self.search.took_ms = result.took.as_secs_f64() * 1000.0;
                             if resp.append {
-                                self.results.extend(result.hits);
+                                self.search.results.extend(result.hits);
                             } else {
-                                self.results = result.hits;
-                                if self.silent_refresh {
-                                    self.selected = self.selected.filter(|i| *i < self.results.len());
+                                self.search.results = result.hits;
+                                if self.search.silent_refresh {
+                                    self.search.selected =
+                                        self.search.selected.filter(|i| *i < self.search.results.len());
                                 } else {
                                     // Первый результат выбран сразу: Enter открывает его, справа видны подробности.
-                                    self.selected = if self.results.is_empty() { None } else { Some(0) };
-                                    self.scroll_to_top = true;
+                                    self.search.selected = if self.search.results.is_empty() { None } else { Some(0) };
+                                    self.search.scroll_to_top = true;
                                     self.narrow_details = false;
                                 }
-                                self.silent_refresh = false;
+                                self.search.silent_refresh = false;
                             }
                         }
                         Err(message) => {
-                            self.search_error = Some(message);
-                            self.results.clear();
-                            self.total = 0;
+                            self.search.search_error = Some(message);
+                            self.search.results.clear();
+                            self.search.total = 0;
                         }
                     }
                 }
@@ -112,10 +114,10 @@ impl App {
         }
         // Индекс обновился (закончилась индексация, пришли изменения с диска) — обновим выдачу.
         let generation = backend.state.generation.load(Ordering::SeqCst);
-        if generation != self.last_generation {
-            self.last_generation = generation;
+        if generation != self.search.last_generation {
+            self.search.last_generation = generation;
             backend.request_count();
-            if !self.form.is_empty() {
+            if !self.search.form.is_empty() {
                 self.mark_dirty(true);
             }
         }

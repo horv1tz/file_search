@@ -46,10 +46,10 @@ fn margin(left: f32, top: f32, right: f32, bottom: f32) -> Margin {
 pub fn draw(ctx: &Context, app: &mut App, actions: &mut Vec<Action>) {
     let pal = theme::palette(ctx.style().visuals.dark_mode);
     let wide = ctx.content_rect().width() >= DETAILS_MIN_WIDTH;
-    let can_show = app.backend_error.is_none()
-        && app.search_error.is_none()
-        && !app.form.is_empty()
-        && app.selected.is_some_and(|i| i < app.results.len());
+    let can_show = app.index.backend_error.is_none()
+        && app.search.search_error.is_none()
+        && !app.search.form.is_empty()
+        && app.search.selected.is_some_and(|i| i < app.search.results.len());
     if wide {
         app.narrow_details = false;
     }
@@ -72,8 +72,11 @@ pub fn draw(ctx: &Context, app: &mut App, actions: &mut Vec<Action>) {
                     if theme::button(ui, &pal, "‹  Назад к списку").on_hover_text("Esc").clicked() {
                         actions.push(Action::BackToList);
                     }
-                    if app.total > 0 {
-                        ui.label(theme::caption(&pal, format!("Найдено файлов: {}", thousands(app.total as u64))));
+                    if app.search.total > 0 {
+                        ui.label(theme::caption(
+                            &pal,
+                            format!("Найдено файлов: {}", thousands(app.search.total as u64)),
+                        ));
                     }
                 });
             });

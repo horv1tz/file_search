@@ -111,15 +111,15 @@ pub(super) const SHORTCUTS: [(&str, &str); 10] = [
 
 pub(super) fn welcome(ui: &mut Ui, app: &App, pal: &Palette, actions: &mut Vec<Action>) {
     let indexing = app.indexing();
-    let status = if indexing && app.num_docs == 0 {
+    let status = if indexing && app.index.num_docs == 0 {
         "Идёт первичная индексация — она может занять несколько минут, искать можно уже сейчас.".to_string()
     } else if indexing {
         format!(
             "Индексация ещё идёт: в поиске пока {} файлов, остальные появятся по мере чтения. Искать можно уже сейчас.",
-            thousands(app.num_docs)
+            thousands(app.index.num_docs)
         )
-    } else if app.num_docs > 0 {
-        format!("В индексе файлов: {}. Поиск учитывает словоформы и опечатки.", thousands(app.num_docs))
+    } else if app.index.num_docs > 0 {
+        format!("В индексе файлов: {}. Поиск учитывает словоформы и опечатки.", thousands(app.index.num_docs))
     } else {
         "Индекс пока пуст.".to_string()
     };

@@ -426,13 +426,13 @@ fn index_tab(ui: &mut Ui, app: &mut App, pal: &Palette, actions: &mut Vec<Action
 }
 
 fn status_card(ui: &mut Ui, app: &mut App, pal: &Palette, actions: &mut Vec<Action>) {
-    let Some(backend) = &app.backend else {
+    let Some(backend) = &app.index.backend else {
         ui.label(theme::body(pal, "Индекс недоступен."));
         return;
     };
     let st = backend.state.clone();
     ui.horizontal(|ui| {
-        ui.label(theme::title(pal, thousands(app.num_docs)));
+        ui.label(theme::title(pal, thousands(app.index.num_docs)));
         ui.label(theme::small(pal, "файлов в индексе"));
     });
     if st.running.load(Ordering::Relaxed) {
@@ -440,7 +440,7 @@ fn status_card(ui: &mut Ui, app: &mut App, pal: &Palette, actions: &mut Vec<Acti
         let done = st.done.load(Ordering::Relaxed);
         if total > 0 {
             theme::progress(ui, pal, done as f32 / total as f32, ui.available_width());
-            let eta = match app.index_eta_secs {
+            let eta = match app.index.index_eta_secs {
                 Some(secs) if secs >= 90 => format!(" · осталось ~{} мин", secs.div_ceil(60)),
                 Some(_) => " · почти готово".to_string(),
                 None => String::new(),

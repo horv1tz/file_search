@@ -44,9 +44,19 @@ pub(super) fn discover_places(tx: Sender<(String, PathBuf)>, ctx: Context) {
     });
 }
 
+/// Индекс: подключённый бэкенд и сведения о ходе индексации.
+pub struct IndexStatus {
+    pub backend: Option<Backend>,
+    pub backend_error: Option<String>,
+    pub num_docs: u64,
+    pub index_was_running: bool,
+    pub index_mark: Option<(Instant, u64)>,
+    pub index_eta_secs: Option<u64>,
+}
+
 impl App {
     pub(super) fn start_indexing(&mut self, force: bool) {
-        if let Some(backend) = &mut self.backend {
+        if let Some(backend) = &mut self.index.backend {
             backend.start_indexing(&self.settings, force);
         }
     }
@@ -104,31 +114,31 @@ impl App {
             self.toast_err(format!("{} не похож на индекс программы — удалять не буду", self.index_dir.display()));
             return;
         }
-        if let Some(backend) = &mut self.backend
+        if let Some(backend) = &mut self.index.backend
             && !backend.shutdown()
         {
             self.toast_err("Индексация ещё не остановилась — подождите несколько секунд и повторите");
             return;
         }
-        self.backend = None;
+        self.index.backend = None;
         if let Err(e) = std::fs::remove_dir_all(&self.index_dir)
             && self.index_dir.exists()
         {
-            self.backend_error = Some(format!("Не удалось удалить индекс: {e}"));
+            self.index.backend_error = Some(format!("Не удалось удалить индекс: {e}"));
             return;
         }
         match Backend::new(ctx.clone(), self.index_dir.clone()) {
             Ok(b) => {
-                self.backend = Some(b);
-                self.backend_error = None;
-                self.results.clear();
-                self.total = 0;
-                self.num_docs = 0;
-                self.last_generation = 0;
+                self.index.backend = Some(b);
+                self.index.backend_error = None;
+                self.search.results.clear();
+                self.search.total = 0;
+                self.index.num_docs = 0;
+                self.search.last_generation = 0;
                 self.start_indexing(true);
                 self.toast_ok("Индекс пересоздан");
             }
-            Err(e) => self.backend_error = Some(format!("{e:#}")),
+            Err(e) => self.index.backend_error = Some(format!("{e:#}")),
         }
     }
 
@@ -136,30 +146,31 @@ impl App {
 
     /// Идёт проход по файлам (первичная индексация, обновление или полная проверка).
     pub fn indexing(&self) -> bool {
-        self.backend.as_ref().is_some_and(|b| b.state.running.load(Ordering::Relaxed))
+        self.index.backend.as_ref().is_some_and(|b| b.state.running.load(Ordering::Relaxed))
     }
 
     /// Следит за ходом индексации: оценивает оставшееся время и сообщает об окончании прохода.
     pub(super) fn track_indexing(&mut self) {
-        let Some(backend) = &self.backend else { return };
+        let Some(backend) = &self.index.backend else { return };
         let st = &backend.state;
         let running = st.running.load(Ordering::Relaxed);
         if running {
             let (done, total) = (st.done.load(Ordering::Relaxed), st.total.load(Ordering::Relaxed));
-            match self.index_mark {
+            match self.index.index_mark {
                 Some((at, start)) if total > 0 && done > start && at.elapsed() >= Duration::from_secs(5) => {
                     let rate = (done - start) as f64 / at.elapsed().as_secs_f64();
-                    self.index_eta_secs = Some(((total.saturating_sub(done)) as f64 / rate.max(1e-6)).ceil() as u64);
+                    self.index.index_eta_secs =
+                        Some(((total.saturating_sub(done)) as f64 / rate.max(1e-6)).ceil() as u64);
                 }
                 Some(_) => {}
-                None if total > 0 => self.index_mark = Some((Instant::now(), done)),
+                None if total > 0 => self.index.index_mark = Some((Instant::now(), done)),
                 None => {}
             }
         } else {
-            self.index_mark = None;
-            self.index_eta_secs = None;
+            self.index.index_mark = None;
+            self.index.index_eta_secs = None;
         }
-        if self.index_was_running && !running {
+        if self.index.index_was_running && !running {
             let summary = st.summary.lock().unwrap().clone();
             if let Some(s) = summary
                 && !s.cancelled
@@ -172,6 +183,6 @@ impl App {
                 self.toast_ok(text);
             }
         }
-        self.index_was_running = running;
+        self.index.index_was_running = running;
     }
 }

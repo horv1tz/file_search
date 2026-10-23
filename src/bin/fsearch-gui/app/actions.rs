@@ -117,7 +117,7 @@ impl App {
     pub fn handle_action(&mut self, ctx: &Context, action: Action) {
         match action {
             Action::Select(i) => {
-                self.selected = Some(i);
+                self.search.selected = Some(i);
                 self.remember_query();
             }
             Action::Open(i) => {
@@ -133,29 +133,29 @@ impl App {
                 }
             }
             Action::CopyPath(i) => {
-                if let Some(h) = self.results.get(i) {
+                if let Some(h) = self.search.results.get(i) {
                     ctx.copy_text(h.path.clone());
                     self.toast_ok("Путь скопирован");
                 }
             }
             Action::CopyName(i) => {
-                if let Some(h) = self.results.get(i) {
+                if let Some(h) = self.search.results.get(i) {
                     ctx.copy_text(h.name.clone());
                     self.toast_ok("Имя скопировано");
                 }
             }
             Action::SearchInFolder(i) => {
                 if let Some(dir) = self.hit_path(i).and_then(|p| p.parent().map(Path::to_path_buf)) {
-                    self.form.dir = Some(dir.to_string_lossy().into_owned());
+                    self.search.form.dir = Some(dir.to_string_lossy().into_owned());
                     self.mark_dirty(false);
                 }
             }
             Action::ClearDirFilter => {
-                self.form.dir = None;
+                self.search.form.dir = None;
                 self.mark_dirty(false);
             }
             Action::UseQuery(text) => {
-                self.form.query = text;
+                self.search.form.query = text;
                 self.focus_search = true;
                 self.mark_dirty(false);
             }
@@ -164,14 +164,14 @@ impl App {
                 self.save_settings();
             }
             Action::ResetFilters => {
-                self.form.groups = [false; GROUPS.len()];
-                self.form.mode = Mode::All;
-                self.form.dir = None;
+                self.search.form.groups = [false; GROUPS.len()];
+                self.search.form.mode = Mode::All;
+                self.search.form.dir = None;
                 self.focus_search = true;
                 self.mark_dirty(false);
             }
             Action::ShowDetails(i) => {
-                self.selected = Some(i);
+                self.search.selected = Some(i);
                 self.narrow_details = true;
             }
             Action::BackToList => {
@@ -230,7 +230,7 @@ impl App {
             Action::CloseSettings => self.close_settings(ctx),
             Action::ApplySettings { force } => self.apply_settings(ctx, force),
             Action::StopIndexing => {
-                if let Some(backend) = &mut self.backend {
+                if let Some(backend) = &mut self.index.backend {
                     backend.stop_indexing();
                 }
             }

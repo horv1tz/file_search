@@ -12,16 +12,16 @@ use file_search::platform::{format_size, format_time, is_safe_to_open};
 use file_search::search::{Hit, Snippet};
 
 pub(super) fn central(ui: &mut Ui, app: &mut App, pal: &Palette, actions: &mut Vec<Action>) {
-    if let Some(error) = &app.backend_error {
+    if let Some(error) = &app.index.backend_error {
         return index_error(ui, app.confirm_reset, error, pal, actions);
     }
-    if app.settings.roots.is_empty() && app.num_docs == 0 {
+    if app.settings.roots.is_empty() && app.index.num_docs == 0 {
         return onboarding(ui, app, pal, actions);
     }
-    if app.form.is_empty() {
+    if app.search.form.is_empty() {
         return welcome(ui, app, pal, actions);
     }
-    if let Some(error) = &app.search_error {
+    if let Some(error) = &app.search.search_error {
         let error = error.clone();
         return empty_state(
             ui,
@@ -34,7 +34,7 @@ pub(super) fn central(ui: &mut Ui, app: &mut App, pal: &Palette, actions: &mut V
             },
         );
     }
-    if app.results.is_empty() {
+    if app.search.results.is_empty() {
         return no_results(ui, app, pal, actions);
     }
     results_list(ui, app, pal, actions);
@@ -87,13 +87,13 @@ pub(super) fn results_list(ui: &mut Ui, app: &mut App, pal: &Palette, actions: &
     ui.add_space(SPACE_XS);
     ui.horizontal(|ui| {
         ui.set_min_height(CONTROL_H);
-        let shown = if app.results.len() < app.total {
-            format!(" · показано {}", thousands(app.results.len() as u64))
+        let shown = if app.search.results.len() < app.search.total {
+            format!(" · показано {}", thousands(app.search.results.len() as u64))
         } else {
             String::new()
         };
-        ui.label(theme::caption(pal, format!("Найдено файлов: {}{shown}", thousands(app.total as u64))))
-            .on_hover_text(format!("Поиск занял {:.0} мс", app.took_ms.max(1.0)));
+        ui.label(theme::caption(pal, format!("Найдено файлов: {}{shown}", thousands(app.search.total as u64))))
+            .on_hover_text(format!("Поиск занял {:.0} мс", app.search.took_ms.max(1.0)));
         if app.indexing() {
             ui.label(RichText::new("· индексация ещё идёт").size(FONT_CAPTION).color(pal.accent))
                 .on_hover_text("Не прочитанные файлы пока не находятся. Ход индексации — в строке состояния внизу");
@@ -107,27 +107,27 @@ pub(super) fn results_list(ui: &mut Ui, app: &mut App, pal: &Palette, actions: &
         }
     });
     let mut scroll = egui::ScrollArea::vertical().id_salt("results").auto_shrink([false, false]);
-    if app.scroll_to_top {
+    if app.search.scroll_to_top {
         scroll = scroll.vertical_scroll_offset(0.0);
-        app.scroll_to_top = false;
+        app.search.scroll_to_top = false;
     }
     let output = scroll.show(ui, |ui| {
         ui.spacing_mut().item_spacing.y = SPACE_SM;
         let mut last_visible = false;
-        for (i, hit) in app.results.iter().enumerate() {
-            let selected = app.selected == Some(i);
+        for (i, hit) in app.search.results.iter().enumerate() {
+            let selected = app.search.selected == Some(i);
             let rect = hit_row(ui, i, hit, selected, !details_visible, pal, actions);
-            if selected && app.scroll_to_selected {
+            if selected && app.search.scroll_to_selected {
                 ui.scroll_to_rect(rect, None);
             }
-            if i + 1 == app.results.len() {
+            if i + 1 == app.search.results.len() {
                 last_visible = ui.is_rect_visible(rect);
             }
         }
         ui.add_space(SPACE_MD);
         last_visible
     });
-    app.scroll_to_selected = false;
+    app.search.scroll_to_selected = false;
     if output.inner {
         app.load_more();
     }

@@ -29,14 +29,14 @@ impl App {
             return actions;
         }
 
-        if self.history_pos.is_some_and(|p| self.settings.history.get(p) != Some(&self.form.query)) {
-            self.history_pos = None;
+        if self.search.history_pos.is_some_and(|p| self.settings.history.get(p) != Some(&self.search.form.query)) {
+            self.search.history_pos = None;
         }
         // Ctrl+1…5 — фильтры по типам, Ctrl+0 — сбросить фильтры.
         const TYPE_KEYS: [Key; 5] = [Key::Num1, Key::Num2, Key::Num3, Key::Num4, Key::Num5];
         for (i, key) in TYPE_KEYS.iter().enumerate() {
             if ctx.input_mut(|inp| inp.consume_key(Modifiers::COMMAND, *key)) {
-                self.form.groups[i] = !self.form.groups[i];
+                self.search.form.groups[i] = !self.search.form.groups[i];
                 self.mark_dirty(false);
             }
         }
@@ -46,15 +46,19 @@ impl App {
         // Стрелка вверх в пустой строке поиска — прошлые запросы (вниз — обратно).
         let search_focused = ctx.memory(|m| m.has_focus(search_id));
         let history_len = self.settings.history.len();
-        let browsing = self.history_pos.is_some();
-        if search_focused && self.results.is_empty() && history_len > 0 && (self.form.query.is_empty() || browsing) {
+        let browsing = self.search.history_pos.is_some();
+        if search_focused
+            && self.search.results.is_empty()
+            && history_len > 0
+            && (self.search.form.query.is_empty() || browsing)
+        {
             let (up, down) = ctx.input_mut(|inp| {
                 (
                     inp.consume_key(Modifiers::NONE, Key::ArrowUp),
                     browsing && inp.consume_key(Modifiers::NONE, Key::ArrowDown),
                 )
             });
-            let next = match (self.history_pos, up, down) {
+            let next = match (self.search.history_pos, up, down) {
                 (None, true, _) => Some(Some(0)),
                 (Some(p), true, _) => Some(Some((p + 1).min(history_len - 1))),
                 (Some(0), _, true) => Some(None),
@@ -62,8 +66,8 @@ impl App {
                 _ => None,
             };
             if let Some(pos) = next {
-                self.history_pos = pos;
-                self.form.query = pos.map(|p| self.settings.history[p].clone()).unwrap_or_default();
+                self.search.history_pos = pos;
+                self.search.form.query = pos.map(|p| self.settings.history[p].clone()).unwrap_or_default();
                 self.focus_search = true;
                 self.mark_dirty(false);
             }
@@ -73,7 +77,7 @@ impl App {
         let selection_in_search = egui::TextEdit::load_state(ctx, search_id)
             .and_then(|s| s.cursor.char_range())
             .is_some_and(|r| r.primary != r.secondary);
-        if !selection_in_search && let Some(i) = self.selected.filter(|i| *i < self.results.len()) {
+        if !selection_in_search && let Some(i) = self.search.selected.filter(|i| *i < self.search.results.len()) {
             let (copy_name, copy_path) = ctx.input_mut(|inp| {
                 (
                     inp.consume_key(Modifiers::COMMAND | Modifiers::SHIFT, Key::C),
@@ -117,28 +121,28 @@ impl App {
             escape = i.consume_key(Modifiers::NONE, Key::Escape);
         });
 
-        if (home || end) && !self.results.is_empty() {
-            self.selected = Some(if home { 0 } else { self.results.len() - 1 });
-            self.scroll_to_selected = true;
+        if (home || end) && !self.search.results.is_empty() {
+            self.search.selected = Some(if home { 0 } else { self.search.results.len() - 1 });
+            self.search.scroll_to_selected = true;
             if end {
                 self.load_more();
             }
         }
-        if delta != 0 && !self.results.is_empty() {
-            let last = self.results.len() as isize - 1;
-            let next = match self.selected {
+        if delta != 0 && !self.search.results.is_empty() {
+            let last = self.search.results.len() as isize - 1;
+            let next = match self.search.selected {
                 None => 0,
                 Some(i) => (i as isize + delta).clamp(0, last),
             };
-            self.selected = Some(next as usize);
-            self.scroll_to_selected = true;
+            self.search.selected = Some(next as usize);
+            self.search.scroll_to_selected = true;
             // Дошли до конца загруженного — подгружаем следующую страницу.
             if next == last {
                 self.load_more();
             }
         }
-        if !self.results.is_empty() && !self.pending() {
-            let target = self.selected.unwrap_or(0);
+        if !self.search.results.is_empty() && !self.pending() {
+            let target = self.search.selected.unwrap_or(0);
             if reveal {
                 actions.push(Action::Reveal(target));
             } else if open {
@@ -147,9 +151,9 @@ impl App {
         }
         if escape && self.narrow_details {
             self.narrow_details = false;
-        } else if escape && !self.form.query.is_empty() {
+        } else if escape && !self.search.form.query.is_empty() {
             self.remember_query();
-            self.form.query.clear();
+            self.search.form.query.clear();
             self.mark_dirty(false);
         }
         actions
@@ -160,14 +164,14 @@ impl App {
     pub(super) fn drive_screenshot(&mut self, ctx: &Context) {
         let Some(plan) = &mut self.screenshot else { return };
         // Снимок делаем, когда индексация закончилась и выдача обновилась.
-        let settled = self.backend.as_ref().is_none_or(|b| {
+        let settled = self.index.backend.as_ref().is_none_or(|b| {
             !b.state.running.load(Ordering::Relaxed)
-                && b.state.generation.load(Ordering::SeqCst) == self.last_generation
+                && b.state.generation.load(Ordering::SeqCst) == self.search.last_generation
         });
         let ready = plan.started.elapsed() > Duration::from_millis(2500)
             && settled
-            && !self.searching
-            && self.dirty_at.is_none();
+            && !self.search.searching
+            && self.search.dirty_at.is_none();
         if !plan.requested && (ready || plan.started.elapsed() > Duration::from_secs(10)) {
             plan.requested = true;
             ctx.send_viewport_cmd(egui::ViewportCommand::Screenshot(egui::UserData::default()));

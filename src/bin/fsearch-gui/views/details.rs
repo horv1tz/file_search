@@ -9,8 +9,8 @@ use file_search::search::Hit;
 
 /// Панель справа (или второй экран): подробности о выбранном файле и все действия над ним.
 pub(super) fn details_panel(ui: &mut Ui, app: &mut App, pal: &Palette, actions: &mut Vec<Action>) {
-    let Some(index) = app.selected else { return };
-    let Some(hit) = app.results.get(index).cloned() else { return };
+    let Some(index) = app.search.selected else { return };
+    let Some(hit) = app.search.results.get(index).cloned() else { return };
     if app.preview.is_some() {
         return text_details(ui, app, &hit, index, pal, actions);
     }
