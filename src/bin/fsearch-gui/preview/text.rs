@@ -34,6 +34,10 @@ impl TextDoc {
         TextDoc { lines, longest, truncated, terms, matches, current: 0, scroll_to_match: true }
     }
 
+    pub fn line_count(&self) -> usize {
+        self.lines.len()
+    }
+
     /// Запрос изменился: подсветку и список совпадений пересчитываем.
     pub fn set_terms(&mut self, terms: Vec<String>) {
         self.matches = match_lines(&self.lines, &terms);

@@ -9,7 +9,6 @@ use std::path::{Path, PathBuf};
 use std::sync::mpsc::{Receiver, Sender, channel};
 
 use egui::{Context, Ui};
-use file_search::platform::format_size;
 use file_search::query::{self, Scope, Text};
 
 use crate::theme::{self, Palette, SPACE_XS};
@@ -30,7 +29,6 @@ enum State {
 pub struct Preview {
     path: PathBuf,
     kind: Kind,
-    size: u64,
     /// Слова запроса для подсветки в тексте.
     terms: Vec<String>,
     state: State,
@@ -63,7 +61,7 @@ impl Preview {
         let size = std::fs::metadata(&path).map(|m| m.len()).unwrap_or(0);
         let (pages, requests) = channel();
         let rx = load::spawn(ctx.clone(), path.clone(), kind, size, requests);
-        Preview { path, kind, size, terms: highlight_terms(query_text), state: State::Loading, rx, pages }
+        Preview { path, kind, terms: highlight_terms(query_text), state: State::Loading, rx, pages }
     }
 
     pub fn path(&self) -> &Path {
@@ -111,13 +109,18 @@ impl Preview {
         }
     }
 
-    /// Сведения о файле в одну строку: тип, размер, при необходимости число страниц.
+    /// Сведения в одну строку: тип и то, что важно для этого типа (строки, страницы). Размер уже есть в шапке,
+    /// размеры картинки — в её просмотре.
     fn meta(&self) -> String {
-        let mut parts = vec![self.kind.label().to_string(), format_size(self.size)];
-        if let State::Pdf(view) = &self.state {
-            parts.push(view.pages_text());
+        let detail = match &self.state {
+            State::Text(doc) => Some(lines_text(doc.line_count())),
+            State::Pdf(view) => Some(view.pages_text()),
+            _ => None,
+        };
+        match detail {
+            Some(detail) => format!("{} · {detail}", self.kind.label()),
+            None => self.kind.label().to_string(),
         }
-        parts.join(" · ")
     }
 
     /// Рисует просмотр в оставшемся месте панели.
@@ -142,9 +145,27 @@ impl Preview {
     }
 }
 
+/// «1 строка», «2 строки», «5 строк» — с правильным окончанием.
+fn lines_text(n: usize) -> String {
+    let word = match (n % 10, n % 100) {
+        (1, m) if m != 11 => "строка",
+        (2..=4, m) if !(12..=14).contains(&m) => "строки",
+        _ => "строк",
+    };
+    format!("{n} {word}")
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn line_counts_agree_with_number() {
+        assert_eq!(lines_text(1), "1 строка");
+        assert_eq!(lines_text(3), "3 строки");
+        assert_eq!(lines_text(12), "12 строк");
+        assert_eq!(lines_text(21), "21 строка");
+    }
 
     #[test]
     fn terms_come_from_content_clauses_only() {
