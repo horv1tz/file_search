@@ -97,7 +97,9 @@ impl Preview {
                     }
                     continue;
                 }
-                Msg::Text { text, truncated } => State::Text(TextDoc::new(&text, truncated, self.terms.clone())),
+                Msg::Text { text, truncated, prose } => {
+                    State::Text(TextDoc::new(&text, truncated, self.terms.clone(), prose))
+                }
                 Msg::Image(image) => State::Picture(Picture::new(ctx, image)),
                 Msg::Pdf { pages } => State::Pdf(PdfView::new(pages)),
                 Msg::Failed(error) => State::Message(error),
@@ -113,7 +115,7 @@ impl Preview {
     /// размеры картинки — в её просмотре.
     fn meta(&self) -> String {
         let detail = match &self.state {
-            State::Text(doc) => Some(lines_text(doc.line_count())),
+            State::Text(doc) => Some(doc.count_text()),
             State::Pdf(view) => Some(view.pages_text()),
             _ => None,
         };
@@ -145,27 +147,9 @@ impl Preview {
     }
 }
 
-/// «1 строка», «2 строки», «5 строк» — с правильным окончанием.
-fn lines_text(n: usize) -> String {
-    let word = match (n % 10, n % 100) {
-        (1, m) if m != 11 => "строка",
-        (2..=4, m) if !(12..=14).contains(&m) => "строки",
-        _ => "строк",
-    };
-    format!("{n} {word}")
-}
-
 #[cfg(test)]
 mod tests {
     use super::*;
-
-    #[test]
-    fn line_counts_agree_with_number() {
-        assert_eq!(lines_text(1), "1 строка");
-        assert_eq!(lines_text(3), "3 строки");
-        assert_eq!(lines_text(12), "12 строк");
-        assert_eq!(lines_text(21), "21 строка");
-    }
 
     #[test]
     fn terms_come_from_content_clauses_only() {

@@ -70,9 +70,11 @@ impl Kind {
 
 /// Что фоновый поток передаёт окну.
 pub enum Msg {
+    /// `prose` — текст документа (показываем абзацами с переносом), иначе код или обычный текст.
     Text {
         text: String,
         truncated: bool,
+        prose: bool,
     },
     Image(ColorImage),
     /// PDF открыт: сколько в нём страниц.
@@ -109,7 +111,7 @@ pub fn spawn(ctx: Context, path: std::path::PathBuf, kind: Kind, size: u64, page
 
 fn read_text(path: &Path) -> Msg {
     match read_for_view(path, MAX_VIEW_BYTES) {
-        Ok((text, truncated)) => Msg::Text { text, truncated },
+        Ok((text, truncated)) => Msg::Text { text, truncated, prose: false },
         Err(e) => Msg::Failed(io_message(&e)),
     }
 }
@@ -128,7 +130,7 @@ fn read_document(path: &Path, size: u64) -> Msg {
     if text.trim().is_empty() {
         return Msg::Failed("В документе нет текста".into());
     }
-    Msg::Text { text, truncated: extracted.truncated }
+    Msg::Text { text, truncated: extracted.truncated, prose: true }
 }
 
 fn read_image(path: &Path) -> Msg {

@@ -1,22 +1,33 @@
-//! Текст целиком, как в редакторе: номера строк, моноширинный шрифт, подсветка слов запроса и переход между
-//! совпадениями.
+//! Текст целиком: код и текстовые файлы — как в редакторе (номера строк, моноширинный шрифт), документы — абзацами
+//! с переносом по ширине панели. Подсветка слов запроса и переход между совпадениями в обоих видах одинаковые.
 
 use egui::text::{LayoutJob, TextFormat};
 use egui::{Align, FontId, Layout, RichText, ScrollArea, Ui, vec2};
 
-use super::load::MAX_VIEW_BYTES;
-use crate::theme::{self, CONTROL_H, FONT_CAPTION, FONT_MONO, Palette, RADIUS_SM, SPACE_XS};
+use egui::Rect;
+
+use crate::theme::{self, CONTROL_H, FONT_BODY, FONT_CAPTION, FONT_MONO, Palette, RADIUS_SM, SPACE_XS};
 
 /// Очень длинные строки (минифицированный код) обрезаем при показе: иначе окно зависает.
 const MAX_LINE_CHARS: usize = 2000;
 /// Сколько мест с совпадениями запоминаем для кнопок «вперёд / назад».
 const MAX_MATCH_LINES: usize = 5000;
+/// Расстояние между абзацами документа.
+const PARA_GAP: f32 = 6.0;
+/// Поля вокруг текста документа.
+const PROSE_PAD: f32 = 8.0;
 
 pub struct TextDoc {
     lines: Vec<String>,
     /// Длина самой длинной строки в символах: от неё зависит ширина области прокрутки.
     longest: usize,
+    /// Текст документа (абзацы с переносом), а не код.
+    prose: bool,
+    /// Текст подрезан при чтении: показываем об этом пометку.
     truncated: bool,
+    /// Положение каждого абзаца по высоте при ширине `laid_width` (с последним элементом — общая высота).
+    starts: Vec<f32>,
+    laid_width: f32,
     terms: Vec<String>,
     /// Номера строк (с нуля), где есть совпадения.
     matches: Vec<usize>,
@@ -27,21 +38,47 @@ pub struct TextDoc {
 }
 
 impl TextDoc {
-    pub fn new(text: &str, truncated: bool, terms: Vec<String>) -> TextDoc {
-        let lines: Vec<String> = text.split('\n').map(clip_line).collect();
+    pub fn new(text: &str, truncated: bool, terms: Vec<String>, prose: bool) -> TextDoc {
+        // Документ переносим по ширине, поэтому абзацы не обрезаем; у кода обрезаем очень длинные строки.
+        let lines: Vec<String> = text.split('\n').map(|l| if prose { l.to_string() } else { clip_line(l) }).collect();
         let longest = lines.iter().map(|l| l.chars().count()).max().unwrap_or(0);
         let matches = match_lines(&lines, &terms);
-        TextDoc { lines, longest, truncated, terms, matches, current: 0, scroll_to_match: true }
+        TextDoc {
+            lines,
+            longest,
+            prose,
+            truncated,
+            starts: Vec::new(),
+            laid_width: 0.0,
+            terms,
+            matches,
+            current: 0,
+            scroll_to_match: true,
+        }
     }
 
-    pub fn line_count(&self) -> usize {
-        self.lines.len()
+    /// «12 строк» для кода, «12 абзацев» для документа — с правильным окончанием.
+    pub fn count_text(&self) -> String {
+        let n = self.lines.len();
+        let (one, few, many) = if self.prose {
+            ("абзац", "абзаца", "абзацев")
+        } else {
+            ("строка", "строки", "строк")
+        };
+        let word = match (n % 10, n % 100) {
+            (1, m) if m != 11 => one,
+            (2..=4, m) if !(12..=14).contains(&m) => few,
+            _ => many,
+        };
+        format!("{n} {word}")
     }
 
     /// Запрос изменился: подсветку и список совпадений пересчитываем.
     pub fn set_terms(&mut self, terms: Vec<String>) {
         self.matches = match_lines(&self.lines, &terms);
         self.terms = terms;
+        // От подсветки зависит раскладка абзацев: пересчитаем её при следующем показе.
+        self.starts.clear();
         self.current = 0;
         self.scroll_to_match = true;
     }
@@ -60,19 +97,104 @@ impl TextDoc {
         self.show_toolbar(ui, pal);
         if self.truncated {
             ui.label(
-                RichText::new(format!("Файл большой: показаны первые {} МБ", MAX_VIEW_BYTES >> 20))
+                RichText::new("Показана только начальная часть текста: файл большой")
                     .size(FONT_CAPTION)
                     .color(pal.warn),
             );
         }
         ui.add_space(SPACE_XS);
-        self.show_lines(ui, pal);
+        if self.prose {
+            self.show_prose(ui, pal);
+        } else {
+            self.show_lines(ui, pal);
+        }
+    }
+
+    /// Документ: абзацы с переносом. Рисуем только видимые абзацы, поэтому длинный документ не тормозит.
+    fn show_prose(&mut self, ui: &mut Ui, pal: &Palette) {
+        let width = (ui.available_width() - 2.0 * PROSE_PAD).max(40.0);
+        if self.starts.is_empty() || (self.laid_width - width).abs() > 0.5 {
+            self.relayout(ui, width, pal);
+        }
+        let total = self.starts.last().copied().unwrap_or(0.0);
+        let text_color = ui.visuals().text_color();
+        let current_line = self.matches.get(self.current).copied();
+        let mut scroll = ScrollArea::vertical().auto_shrink([false, false]).id_salt("preview-prose");
+        if std::mem::take(&mut self.scroll_to_match)
+            && let Some(line) = current_line
+        {
+            scroll = scroll.vertical_scroll_offset((self.starts[line] - 2.0 * PARA_GAP).max(0.0));
+        }
+        egui::Frame::new()
+            .fill(ui.visuals().extreme_bg_color)
+            .stroke(egui::Stroke::new(theme::LINE_W, pal.line))
+            .corner_radius(theme::radius(RADIUS_SM))
+            .show(ui, |ui| {
+                scroll.show_viewport(ui, |ui, viewport| {
+                    ui.set_height(total + 2.0 * PROSE_PAD);
+                    let origin = ui.min_rect().min + vec2(PROSE_PAD, PROSE_PAD);
+                    // Первый видимый абзац ищем по высотам, дальше идём, пока не выйдем за нижний край.
+                    let first = self.starts.partition_point(|&y| y <= viewport.min.y).saturating_sub(1);
+                    for i in first..self.lines.len() {
+                        let y = self.starts[i];
+                        if y > viewport.max.y {
+                            break;
+                        }
+                        let galley = ui.fonts_mut(|f| f.layout_job(self.paragraph(i, width, pal)));
+                        if current_line == Some(i) {
+                            let rect = Rect::from_min_size(
+                                origin + vec2(-PROSE_PAD, y),
+                                vec2(width + 2.0 * PROSE_PAD, galley.size().y),
+                            );
+                            ui.painter().rect_filled(rect, RADIUS_SM, pal.line_hl);
+                        }
+                        ui.painter().galley(origin + vec2(0.0, y), galley, text_color);
+                    }
+                });
+            });
+    }
+
+    /// Пересчитывает высоты всех абзацев для ширины `width`.
+    fn relayout(&mut self, ui: &mut Ui, width: f32, pal: &Palette) {
+        let mut starts = Vec::with_capacity(self.lines.len() + 1);
+        let mut y = 0.0;
+        for i in 0..self.lines.len() {
+            starts.push(y);
+            let galley = ui.fonts_mut(|f| f.layout_job(self.paragraph(i, width, pal)));
+            y += galley.size().y + PARA_GAP;
+        }
+        starts.push(y);
+        self.starts = starts;
+        self.laid_width = width;
+    }
+
+    /// Абзац `i` с подсветкой совпадений, перенесённый по `width`.
+    fn paragraph(&self, i: usize, width: f32, pal: &Palette) -> LayoutJob {
+        let font = theme::font(FONT_BODY);
+        let normal = TextFormat { font_id: font.clone(), color: pal.text, ..Default::default() };
+        let marked = TextFormat { font_id: font, color: pal.mark_fg, background: pal.mark_bg, ..Default::default() };
+        let line = &self.lines[i];
+        let mut job = LayoutJob::default();
+        job.wrap.max_width = width;
+        if line.is_empty() {
+            // Пустой абзац всё равно должен занимать строку.
+            job.append(" ", 0.0, normal);
+            return job;
+        }
+        let mut pos = 0;
+        for (s, e) in find_marks(line, &self.terms) {
+            job.append(&line[pos..s], 0.0, normal.clone());
+            job.append(&line[s..e], 0.0, marked.clone());
+            pos = e;
+        }
+        job.append(&line[pos..], 0.0, normal);
+        job
     }
 
     fn show_toolbar(&mut self, ui: &mut Ui, pal: &Palette) {
         ui.horizontal(|ui| {
             let info = if self.terms.is_empty() {
-                format!("{} стр.", self.lines.len())
+                self.count_text()
             } else if self.matches.is_empty() {
                 "Совпадений в тексте нет".to_string()
             } else {
@@ -217,6 +339,15 @@ mod tests {
     use super::*;
 
     #[test]
+    fn counts_agree_with_number() {
+        let lines = |n: usize| ["x"; 12][..n].join("\n");
+        assert_eq!(TextDoc::new("a", false, vec![], false).count_text(), "1 строка");
+        assert_eq!(TextDoc::new("a\nb\nc", false, vec![], false).count_text(), "3 строки");
+        assert_eq!(TextDoc::new("a", false, vec![], true).count_text(), "1 абзац");
+        assert_eq!(TextDoc::new(&lines(12), false, vec![], true).count_text(), "12 абзацев");
+    }
+
+    #[test]
     fn marks_are_case_insensitive_and_merged() {
         let terms = vec!["срок".to_string(), "ок д".to_string()];
         assert_eq!(find_marks("Срок действия", &terms), [(0, 11)]);
@@ -234,7 +365,7 @@ mod tests {
 
     #[test]
     fn stepping_wraps_around_matches() {
-        let mut doc = TextDoc::new("срок\nпусто\nсрок", false, vec!["срок".to_string()]);
+        let mut doc = TextDoc::new("срок\nпусто\nсрок", false, vec!["срок".to_string()], false);
         assert_eq!(doc.matches, [0, 2]);
         doc.step(false);
         assert_eq!(doc.current, 1);
