@@ -20,6 +20,13 @@ use sha2::{Digest, Sha256};
 pub const REPO: &str = "horv1tz/file_search";
 pub const RELEASES_URL: &str = "https://github.com/horv1tz/file_search/releases";
 const API_BASE: &str = "https://api.github.com";
+
+/// TLS-библиотека должна совпадать с feature в Cargo.toml для этой платформы:
+/// иначе ureq паникует при первом https-запросе.
+#[cfg(any(windows, target_os = "macos"))]
+const TLS_PROVIDER: ureq::tls::TlsProvider = ureq::tls::TlsProvider::NativeTls;
+#[cfg(not(any(windows, target_os = "macos")))]
+const TLS_PROVIDER: ureq::tls::TlsProvider = ureq::tls::TlsProvider::Rustls;
 /// Имя файла окна для Windows в выпуске (без номера версии, чтобы ссылка не зависела от неё).
 const WINDOWS_GUI_ASSET: &str = "fsearch-gui-windows-x64.exe";
 const CHECKSUMS_ASSET: &str = "SHA256SUMS.txt";
@@ -146,6 +153,7 @@ impl Client {
     /// Клиент с другим адресом API (для проверок на локальном сервере).
     pub fn with_base(api_base: &str) -> Client {
         let config = ureq::Agent::config_builder()
+            .tls_config(ureq::tls::TlsConfig::builder().provider(TLS_PROVIDER).build())
             .user_agent(format!("fsearch/{} (+https://github.com/{REPO})", env!("CARGO_PKG_VERSION")))
             .timeout_connect(Some(Duration::from_secs(10)))
             .timeout_recv_response(Some(Duration::from_secs(20)))

@@ -276,6 +276,10 @@ fn run_window(mode: Mode, quiet: bool) -> i32 {
 
     log_line(&format!("Окно ({}) не удалось: {error}", mode.name()));
     if APP_CREATED.load(Ordering::SeqCst) {
+        // Окно уже работало и упало на отрисовке (Direct3D/Vulkan): открываем программу заново через OpenGL.
+        if mode == Mode::Wgpu && restart_with_glow() {
+            return 0;
+        }
         show_error(&format!(
             "Программа завершилась с ошибкой:\n{error}\n\nПодробности записаны в {}",
             log_path().display()
@@ -289,6 +293,23 @@ fn run_window(mode: Mode, quiet: bool) -> i32 {
         ));
     }
     EXIT_WINDOW_FAILED
+}
+
+/// Запускает новый экземпляр программы с OpenGL вместо Direct3D/Vulkan. Вызывается, когда замок уже отпущен.
+/// Возвращает `false`, если запустить не удалось.
+fn restart_with_glow() -> bool {
+    let Ok(exe) = std::env::current_exe() else { return false };
+    let args: Vec<String> = std::env::args().skip(1).filter(|a| !a.starts_with("--renderer=")).collect();
+    match std::process::Command::new(exe).args(args).arg("--renderer=glow").spawn() {
+        Ok(_) => {
+            log_line("Окно (wgpu) упало во время работы: программа открыта заново через OpenGL");
+            true
+        }
+        Err(e) => {
+            log_line(&format!("Не удалось открыть программу заново через OpenGL: {e}"));
+            false
+        }
+    }
 }
 
 /// Выбирает способ отрисовки. На Windows окно рисуется через Direct3D 12 или Vulkan, если есть подходящий
@@ -315,7 +336,13 @@ fn gpu_available() -> bool {
 fn auto() -> ! {
     let mode = choose_mode();
     log_line(&format!("Способ отрисовки: {}", mode.name()));
-    match run_window(mode, true) {
+    let mut code = run_window(mode, true);
+    if code == EXIT_WINDOW_FAILED && mode == Mode::Wgpu {
+        // Второй способ из справки: если Direct3D/Vulkan не открылись, пробуем OpenGL до режима браузера.
+        log_line("Окно (wgpu) не открылось, пробуем OpenGL");
+        code = run_window(Mode::Glow, true);
+    }
+    match code {
         0 | EXIT_ALREADY_RUNNING => std::process::exit(0),
         EXIT_WINDOW_FAILED => browser_mode("окно не удалось создать"),
         code => std::process::exit(code),
