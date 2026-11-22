@@ -159,10 +159,10 @@ pub fn palette(dark: bool) -> Palette {
 pub fn badge(ext: &str, dark: bool) -> (Color32, String) {
     let pick = |light: u32, dk: u32| rgb(if dark { dk } else { light });
     let color = match GROUPS.iter().position(|(_, exts)| exts.contains(&ext)) {
-        Some(0) => pick(0x2b5cb8, 0x4a7fd6),
-        Some(1) => pick(0x1f7a4d, 0x2e9160),
-        Some(2) => pick(0xc2410c, 0xd2642a),
-        Some(3) => pick(0xc62828, 0xd05555),
+        Some(0) => pick(0x2b5cb8, 0x3f6fc4),
+        Some(1) => pick(0x1f7a4d, 0x267f50),
+        Some(2) => pick(0xc2410c, 0xc2521a),
+        Some(3) => pick(0xc62828, 0xcc3f3f),
         Some(_) => pick(0x556075, 0x66718a),
         None => pick(0x667085, 0x66718a),
     };
