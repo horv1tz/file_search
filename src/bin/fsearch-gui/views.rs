@@ -230,15 +230,26 @@ fn header(ui: &mut Ui, app: &mut App, pal: &Palette, actions: &mut Vec<Action>) 
     ui.horizontal(|ui| {
         let side = CONTROL_H + SPACE_SM;
         let box_width = (ui.available_width() - side).max(220.0);
-        // Поисковая строка — центральный элемент: карточка на поверхности с мягкой тенью.
+        // Поисковая строка — центральный элемент: карточка на поверхности с мягкой тенью;
+        // при фокусе рамка загорается акцентом, а тень приобретает акцентный оттенок.
+        let glow = if focused {
+            egui::Shadow {
+                offset: [0, 0],
+                blur: 20,
+                spread: 0,
+                color: pal.accent.gamma_multiply(if pal.dark { 0.5 } else { 0.35 }),
+            }
+        } else {
+            theme::shadow(pal)
+        };
         Frame::new()
             .fill(pal.surface)
-            .stroke(Stroke::new(LINE_W + 0.5, if focused { pal.accent } else { pal.line }))
+            .stroke(Stroke::new(if focused { 1.6_f32 } else { LINE_W }, if focused { pal.accent } else { pal.line }))
             .corner_radius(theme::radius(RADIUS_LG))
-            .shadow(theme::shadow(pal))
-            .inner_margin(Margin::symmetric(SPACE_MD as i8, SPACE_SM as i8))
+            .shadow(glow)
+            .inner_margin(Margin::symmetric(SPACE_LG as i8, SPACE_SM as i8))
             .show(ui, |ui| {
-                ui.set_width(box_width - 2.0 * SPACE_MD - 3.0);
+                ui.set_width(box_width - 2.0 * SPACE_LG - 3.0);
                 ui.set_min_height(SEARCH_H - 2.0 * SPACE_SM);
                 ui.horizontal_centered(|ui| {
                     magnifier(ui, if focused { pal.accent } else { pal.muted });
@@ -284,6 +295,10 @@ fn header(ui: &mut Ui, app: &mut App, pal: &Palette, actions: &mut Vec<Action>) 
                         app.form.query.clear();
                         changed = true;
                         app.focus_search = true;
+                    }
+                    // В пустом неактивном поле справа — подсказка о горячей клавише поиска.
+                    if app.form.query.is_empty() && !focused && !app.searching {
+                        theme::keycap(ui, pal, "Ctrl F");
                     }
                 });
             });
@@ -339,22 +354,16 @@ fn filter_pills(ui: &mut Ui, app: &mut App, pal: &Palette, changed: &mut bool) {
 
 /// Режим поиска, порядок и папка.
 fn filter_controls(ui: &mut Ui, app: &mut App, pal: &Palette, actions: &mut Vec<Action>, changed: &mut bool) {
-    ComboBox::from_id_salt("mode").width(150.0).height(CONTROL_H).selected_text(mode_label(app.form.mode)).show_ui(
-        ui,
-        |ui| {
-            for m in [Mode::All, Mode::Name, Mode::Content] {
-                *changed |= ui.selectable_value(&mut app.form.mode, m, mode_label(m)).changed();
-            }
-        },
-    );
-    ComboBox::from_id_salt("sort").width(170.0).height(CONTROL_H).selected_text(sort_label(app.form.sort)).show_ui(
-        ui,
-        |ui| {
-            for s in [Sort::Relevance, Sort::Newest, Sort::Oldest, Sort::Largest, Sort::Smallest] {
-                *changed |= ui.selectable_value(&mut app.form.sort, s, sort_label(s)).changed();
-            }
-        },
-    );
+    ComboBox::from_id_salt("mode").width(150.0).selected_text(mode_label(app.form.mode)).show_ui(ui, |ui| {
+        for m in [Mode::All, Mode::Name, Mode::Content] {
+            *changed |= ui.selectable_value(&mut app.form.mode, m, mode_label(m)).changed();
+        }
+    });
+    ComboBox::from_id_salt("sort").width(170.0).selected_text(sort_label(app.form.sort)).show_ui(ui, |ui| {
+        for s in [Sort::Relevance, Sort::Newest, Sort::Oldest, Sort::Largest, Sort::Smallest] {
+            *changed |= ui.selectable_value(&mut app.form.sort, s, sort_label(s)).changed();
+        }
+    });
     match &app.form.dir {
         Some(dir) => {
             let name = std::path::Path::new(dir)
@@ -690,7 +699,8 @@ fn hit_row(
     pal: &Palette,
     actions: &mut Vec<Action>,
 ) -> Rect {
-    // Фон рисуем после содержимого (когда известно, наведён ли курсор), поэтому резервируем место в списке фигур.
+    // Фон и тень рисуем после содержимого (когда известно, наведён ли курсор), поэтому резервируем место в списке фигур.
+    let shadow_slot = ui.painter().add(Shape::Noop);
     let background = ui.painter().add(Shape::Noop);
     let inner = ui.scope_builder(UiBuilder::new().id_salt(&hit.path).sense(Sense::click()), |ui| {
         Frame::new().inner_margin(Margin::symmetric(SPACE_LG as i8, SPACE_MD as i8)).show(ui, |ui| {
@@ -698,7 +708,7 @@ fn hit_row(
             ui.spacing_mut().item_spacing.x = SPACE_MD;
             ui.horizontal_top(|ui| {
                 let (color, label) = theme::badge(&hit.ext, pal.dark);
-                theme::file_tile(ui, &label, color, 40.0);
+                theme::file_tile(ui, &label, color, 44.0);
                 ui.vertical(|ui| {
                     ui.spacing_mut().item_spacing.y = SPACE_XS;
                     ui.add(egui::Label::new(theme::heading(pal, &hit.name)).truncate());
@@ -778,6 +788,11 @@ fn hit_row(
     } else {
         pal.surface
     };
+    // При наведении карточка «приподнимается»: мягкая тень под ней.
+    if response.hovered() && !selected {
+        let shadow_shape = theme::shadow(pal).as_shape(rect, theme::radius(RADIUS_MD));
+        ui.painter().set(shadow_slot, Shape::Rect(shadow_shape));
+    }
     ui.painter().set(background, Shape::rect_filled(rect, theme::radius(RADIUS_MD), fill));
     ui.painter().rect_stroke(rect, theme::radius(RADIUS_MD), Stroke::new(LINE_W, pal.line), StrokeKind::Inside);
     if selected {
@@ -826,36 +841,8 @@ fn details_panel(ui: &mut Ui, app: &mut App, pal: &Palette, actions: &mut Vec<Ac
             theme::file_tile(ui, &label, color, 48.0);
             ui.add(egui::Label::new(theme::heading(pal, &hit.name)).wrap());
         });
-        ui.add_space(SPACE_MD);
-        let fact = |ui: &mut Ui, title: &str, value: String| {
-            ui.label(theme::caption(pal, title));
-            ui.add(egui::Label::new(theme::body(pal, value)).wrap());
-            ui.add_space(SPACE_XS);
-        };
-        fact(ui, "Папка", parent_of(&hit.path));
-        fact(ui, "Размер", format_size(hit.size));
-        fact(ui, "Изменён", format_time(hit.modified_ms));
-        if let Some(location) = &hit.location {
-            fact(ui, "Найдено", location.clone());
-        }
-        if let Some(note) = status_note(&hit.status) {
-            ui.add(egui::Label::new(RichText::new(note).size(FONT_SMALL).color(pal.warn)).wrap());
-            ui.add_space(SPACE_XS);
-        }
-        if let Some(snippet) = &hit.snippet {
-            ui.label(theme::caption(pal, "Фрагмент"));
-            Frame::new()
-                .fill(pal.surface_alt)
-                .corner_radius(theme::radius(RADIUS_SM))
-                .inner_margin(Margin::same(SPACE_MD as i8))
-                .show(ui, |ui| {
-                    let width = ui.available_width();
-                    ui.add(egui::Label::new(snippet_job(snippet, pal, width)).wrap());
-                });
-            ui.add_space(SPACE_SM);
-        }
-        ui.add_space(SPACE_XS);
-        // Действия — компактным рядом, а не колонной на всю ширину панели.
+        ui.add_space(SPACE_SM);
+        // Действия сразу под заголовком — самое частое, что нужно из подробностей.
         ui.horizontal_wrapped(|ui| {
             ui.spacing_mut().item_spacing.x = SPACE_SM;
             let openable = is_safe_to_open(std::path::Path::new(&hit.path));
@@ -881,6 +868,35 @@ fn details_panel(ui: &mut Ui, app: &mut App, pal: &Palette, actions: &mut Vec<Ac
                 actions.push(Action::SearchInFolder(index));
             }
         });
+        ui.add_space(SPACE_MD);
+        let fact = |ui: &mut Ui, title: &str, value: String| {
+            ui.horizontal(|ui| {
+                ui.add(egui::Label::new(theme::caption(pal, title)).selectable(false));
+                ui.add(egui::Label::new(theme::body(pal, value)).wrap());
+            });
+            ui.add_space(SPACE_XS);
+        };
+        fact(ui, "Папка", parent_of(&hit.path));
+        fact(ui, "Размер", format_size(hit.size));
+        fact(ui, "Изменён", format_time(hit.modified_ms));
+        if let Some(location) = &hit.location {
+            fact(ui, "Найдено", location.clone());
+        }
+        if let Some(note) = status_note(&hit.status) {
+            ui.add(egui::Label::new(RichText::new(note).size(FONT_SMALL).color(pal.warn)).wrap());
+            ui.add_space(SPACE_XS);
+        }
+        if let Some(snippet) = &hit.snippet {
+            ui.label(theme::caption(pal, "Фрагмент"));
+            Frame::new()
+                .fill(pal.surface_alt)
+                .corner_radius(theme::radius(RADIUS_SM))
+                .inner_margin(Margin::same(SPACE_MD as i8))
+                .show(ui, |ui| {
+                    let width = ui.available_width();
+                    ui.add(egui::Label::new(snippet_job(snippet, pal, width)).wrap());
+                });
+        }
     });
 }
 
@@ -1111,11 +1127,17 @@ fn welcome(ui: &mut Ui, app: &App, pal: &Palette, actions: &mut Vec<Action>) {
             ui.label(theme::heading(pal, "Примеры запросов"));
             ui.label(theme::caption(pal, "Нажмите на пример, чтобы попробовать"));
             ui.add_space(SPACE_XS);
-            // Примеры — кликабельные таблетки: запрос подставляется в строку поиска, смысл — в подсказке.
+            // Примеры — кликабельные плашки с моноширинным запросом; смысл — во всплывающей подсказке.
             ui.horizontal_wrapped(|ui| {
                 ui.spacing_mut().item_spacing = vec2(SPACE_XS, SPACE_XS);
                 for (code, description) in EXAMPLES.iter() {
-                    if theme::pill(ui, pal, code, false)
+                    let btn =
+                        egui::Button::new(RichText::new(*code).monospace().size(theme::FONT_MONO).color(pal.accent))
+                            .fill(pal.surface_alt)
+                            .corner_radius(theme::radius(RADIUS_SM))
+                            .min_size(vec2(0.0, CONTROL_H - 4.0));
+                    if ui
+                        .add(btn)
                         .on_hover_text(format!("{description}\nНажмите, чтобы выполнить этот запрос"))
                         .clicked()
                     {

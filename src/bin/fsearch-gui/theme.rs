@@ -7,7 +7,7 @@ use std::sync::Arc;
 
 use egui::{
     Align, Color32, Context, CornerRadius, FontData, FontDefinitions, FontFamily, FontId, Layout, Response, RichText,
-    Sense, Stroke, TextStyle, Theme as EguiTheme, Ui, vec2,
+    Sense, Stroke, TextStyle, Theme as EguiTheme, Ui, pos2, vec2,
 };
 
 use crate::settings::Theme;
@@ -47,7 +47,7 @@ pub const SPACE_XL: f32 = 24.0;
 /// Высота всех элементов управления (кнопки, выпадающие списки, «таблетки») и минимальная цель нажатия.
 pub const CONTROL_H: f32 = 32.0;
 /// Высота строки поиска.
-pub const SEARCH_H: f32 = 48.0;
+pub const SEARCH_H: f32 = 54.0;
 /// Толщина единственной линии-разделителя.
 pub const LINE_W: f32 = 1.0;
 
@@ -99,15 +99,15 @@ const fn rgb(hex: u32) -> Color32 {
 
 pub const LIGHT: Palette = Palette {
     dark: false,
-    bg: rgb(0xf4f5fa),
+    bg: rgb(0xf5f6fb),
     surface: rgb(0xffffff),
-    surface_alt: rgb(0xeceef6),
+    surface_alt: rgb(0xedeff7),
     hover: rgb(0xeef1fa),
-    selected: rgb(0xe3e9fc),
-    line: rgb(0xdde1ee),
-    text: rgb(0x1b2130),
-    text_2: rgb(0x3e4659),
-    muted: rgb(0x5a6378),
+    selected: rgb(0xe2e8fd),
+    line: rgb(0xdde2ef),
+    text: rgb(0x171c2b),
+    text_2: rgb(0x3d455a),
+    muted: rgb(0x5d6579),
     accent: rgb(0x4f46e5),
     on_accent: rgb(0xffffff),
     ok: rgb(0x17663b),
@@ -118,37 +118,37 @@ pub const LIGHT: Palette = Palette {
     danger_soft: rgb(0xfce8e6),
     danger_solid: rgb(0xb3261e),
     on_danger: rgb(0xffffff),
-    mark_bg: rgb(0xfff0a8),
+    mark_bg: rgb(0xffed9e),
     mark_fg: rgb(0x3a2e00),
     gutter: rgb(0x8a93a5),
-    line_hl: rgb(0xe9eefb),
+    line_hl: rgb(0xe7edfc),
 };
 
 pub const DARK: Palette = Palette {
     dark: true,
-    bg: rgb(0x12141c),
-    surface: rgb(0x1a1d28),
-    surface_alt: rgb(0x252936),
-    hover: rgb(0x232735),
-    selected: rgb(0x272f52),
-    line: rgb(0x2f3444),
-    text: rgb(0xe9ecf4),
-    text_2: rgb(0xc7cdda),
-    muted: rgb(0x9da6ba),
-    accent: rgb(0xa5b4fc),
-    on_accent: rgb(0x11152e),
-    ok: rgb(0x62d49c),
-    ok_soft: rgb(0x15281f),
+    bg: rgb(0x0b0d14),
+    surface: rgb(0x141724),
+    surface_alt: rgb(0x1c2130),
+    hover: rgb(0x222839),
+    selected: rgb(0x2b3357),
+    line: rgb(0x272d40),
+    text: rgb(0xf0f3fa),
+    text_2: rgb(0xccd3e5),
+    muted: rgb(0x99a2bd),
+    accent: rgb(0x93a3ff),
+    on_accent: rgb(0x0d1130),
+    ok: rgb(0x67d69f),
+    ok_soft: rgb(0x14261d),
     warn: rgb(0xf2a672),
-    warn_soft: rgb(0x2d2018),
+    warn_soft: rgb(0x2b1f17),
     danger: rgb(0xff9494),
-    danger_soft: rgb(0x2e1b1d),
+    danger_soft: rgb(0x2c1a1c),
     danger_solid: rgb(0xe5645f),
     on_danger: rgb(0x2a0a0a),
-    mark_bg: rgb(0x5c4a00),
+    mark_bg: rgb(0x6b5700),
     mark_fg: rgb(0xfff3c4),
     gutter: rgb(0x6d7689),
-    line_hl: rgb(0x272f4a),
+    line_hl: rgb(0x293252),
 };
 
 pub fn palette(dark: bool) -> Palette {
@@ -173,10 +173,10 @@ pub fn badge(ext: &str, dark: bool) -> (Color32, String) {
 /// Мягкая тень для карточек и поисковой строки: невысокий сдвиг вниз и широкое размытие.
 pub fn shadow(pal: &Palette) -> egui::Shadow {
     egui::Shadow {
-        offset: [0, 6],
-        blur: 18,
+        offset: [0, 10],
+        blur: 28,
         spread: 0,
-        color: Color32::from_black_alpha(if pal.dark { 130 } else { 34 }),
+        color: Color32::from_black_alpha(if pal.dark { 140 } else { 30 }),
     }
 }
 
@@ -456,13 +456,21 @@ pub fn chip(ui: &mut Ui, text: &str, color: Color32, bg: Color32) {
     ui.painter().galley(rect.center() - galley.size() / 2.0, galley, color);
 }
 
-/// Значок типа файла: цветная плитка с расширением.
+/// Значок типа файла: цветная плитка с градиентом и бликом сверху — выглядит объёмнее плоского квадрата.
 pub fn file_tile(ui: &mut Ui, label: &str, color: Color32, size: f32) {
     let (rect, _) = ui.allocate_exact_size(vec2(size, size), Sense::hover());
-    ui.painter().rect_filled(rect, radius(RADIUS_MD), color);
+    let painter = ui.painter();
+    let r = radius(RADIUS_MD);
+    painter.rect_filled(rect, r, color);
+    // Верхняя половина чуть светлее: простая имитация вертикального градиента.
+    let top = egui::Rect::from_min_max(rect.min, pos2(rect.right(), rect.center().y));
+    painter.rect_filled(top, egui::CornerRadius { nw: r.nw, ne: r.ne, sw: 0, se: 0 }, color.gamma_multiply(1.22));
+    // Тонкая светлая кромка сверху — «стеклянный» блик.
+    let sheen = egui::Rect::from_min_size(rect.min + vec2(1.5, 1.5), vec2(rect.width() - 3.0, 1.5));
+    painter.rect_filled(sheen, 1, Color32::from_white_alpha(50));
     let text: String = label.chars().take(4).collect();
-    let galley = ui.painter().layout_no_wrap(text, font(FONT_CAPTION), Color32::WHITE);
-    ui.painter().galley(rect.center() - galley.size() / 2.0, galley, Color32::WHITE);
+    let galley = painter.layout_no_wrap(text, font(FONT_CAPTION), Color32::WHITE);
+    painter.galley(rect.center() - galley.size() / 2.0 + vec2(0.0, 0.5), galley, Color32::WHITE);
 }
 
 /// Клавиша на «клавиатурной шапке»: подсказка о горячих клавишах.
@@ -533,35 +541,39 @@ pub fn icon_button(ui: &mut Ui, pal: &Palette, icon: Icon, title: &str) -> Respo
     response.on_hover_text(title).on_hover_cursor(egui::CursorIcon::PointingHand)
 }
 
-/// Крупный значок в круге.
+/// Крупный значок в круге с акцентным градиентом и мягким свечением — для пустых состояний.
 pub fn icon_badge(ui: &mut Ui, pal: &Palette, icon: Icon) {
-    let size = 64.0;
+    let size = 72.0;
     let (rect, _) = ui.allocate_exact_size(vec2(size, size), Sense::hover());
+    let c = rect.center();
+    let painter = ui.painter();
+    // Свечение за кругом.
+    painter.circle_filled(c, size / 1.55, pal.accent.gamma_multiply(if pal.dark { 0.30 } else { 0.22 }));
+    painter.circle_filled(c, size / 1.8, pal.accent.gamma_multiply(if pal.dark { 0.55 } else { 0.45 }));
+    // Сам круг: акцентный с более светлой верхней частью.
     let (bg, fg) = match icon {
         Icon::Warning => (pal.warn_soft, pal.warn),
-        _ => (pal.selected, pal.accent),
+        _ => (pal.accent, pal.on_accent),
     };
-    let painter = ui.painter();
-    painter.circle_filled(rect.center(), size / 2.0, bg);
-    let stroke = Stroke::new(3.0_f32, fg);
-    let c = rect.center();
+    painter.circle_filled(c, size / 2.2, bg);
+    let stroke = Stroke::new(3.2_f32, fg);
     match icon {
         Icon::Search => {
             let lens = c - vec2(3.0, 3.0);
-            painter.circle_stroke(lens, 11.0, stroke);
-            painter.line_segment([lens + vec2(8.0, 8.0), lens + vec2(17.0, 17.0)], stroke);
+            painter.circle_stroke(lens, 12.0, stroke);
+            painter.line_segment([lens + vec2(8.5, 8.5), lens + vec2(18.0, 18.0)], stroke);
         }
         Icon::Folder => {
-            let body = egui::Rect::from_center_size(c + vec2(0.0, 2.0), vec2(30.0, 21.0));
+            let body = egui::Rect::from_center_size(c + vec2(0.0, 2.0), vec2(32.0, 22.0));
             painter.rect_stroke(body, radius(4), stroke, egui::StrokeKind::Middle);
-            painter.line_segment([body.left_top() + vec2(0.0, -1.0), body.left_top() + vec2(10.0, -1.0)], stroke);
+            painter.line_segment([body.left_top() + vec2(0.0, -1.0), body.left_top() + vec2(11.0, -1.0)], stroke);
         }
         Icon::Warning => {
-            let top = c + vec2(0.0, -14.0);
-            let (l, r) = (c + vec2(-15.0, 12.0), c + vec2(15.0, 12.0));
+            let top = c + vec2(0.0, -15.0);
+            let (l, r) = (c + vec2(-16.0, 13.0), c + vec2(16.0, 13.0));
             painter.add(egui::Shape::closed_line(vec![top, r, l], stroke));
             painter.line_segment([c + vec2(0.0, -4.0), c + vec2(0.0, 3.0)], stroke);
-            painter.circle_filled(c + vec2(0.0, 7.5), 1.8, fg);
+            painter.circle_filled(c + vec2(0.0, 8.0), 1.9, fg);
         }
         // Gear в крупном значке не нужен — оставляем круг с фоном.
         Icon::Gear => {}
