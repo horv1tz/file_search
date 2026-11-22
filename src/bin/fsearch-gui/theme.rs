@@ -24,7 +24,7 @@ pub const GROUPS: [(&str, &[&str]); 5] = [
 // ------------------------------------------------------------------ шкалы
 
 /// Размеры шрифта: заголовок, подзаголовок, основной, мелкий, подпись.
-pub const FONT_TITLE: f32 = 20.0;
+pub const FONT_TITLE: f32 = 22.0;
 pub const FONT_HEADING: f32 = 16.0;
 pub const FONT_BODY: f32 = 14.0;
 pub const FONT_SMALL: f32 = 13.0;
@@ -33,9 +33,9 @@ pub const FONT_CAPTION: f32 = 12.0;
 pub const FONT_MONO: f32 = 13.0;
 
 /// Скругления: элементы управления, карточки и панели, «таблетки» и поле поиска.
-pub const RADIUS_SM: u8 = 8;
-pub const RADIUS_MD: u8 = 12;
-pub const RADIUS_LG: u8 = 16;
+pub const RADIUS_SM: u8 = 10;
+pub const RADIUS_MD: u8 = 14;
+pub const RADIUS_LG: u8 = 18;
 
 /// Отступы.
 pub const SPACE_XS: f32 = 4.0;
@@ -99,16 +99,16 @@ const fn rgb(hex: u32) -> Color32 {
 
 pub const LIGHT: Palette = Palette {
     dark: false,
-    bg: rgb(0xf5f6f8),
+    bg: rgb(0xf4f5fa),
     surface: rgb(0xffffff),
-    surface_alt: rgb(0xeef0f4),
-    hover: rgb(0xf3f6fc),
-    selected: rgb(0xe5edff),
-    line: rgb(0xdde1e8),
-    text: rgb(0x1d222c),
-    text_2: rgb(0x434b5a),
-    muted: rgb(0x5b6475),
-    accent: rgb(0x1f55d0),
+    surface_alt: rgb(0xeceef6),
+    hover: rgb(0xeef1fa),
+    selected: rgb(0xe3e9fc),
+    line: rgb(0xdde1ee),
+    text: rgb(0x1b2130),
+    text_2: rgb(0x3e4659),
+    muted: rgb(0x5a6378),
+    accent: rgb(0x4f46e5),
     on_accent: rgb(0xffffff),
     ok: rgb(0x17663b),
     ok_soft: rgb(0xe3f3ea),
@@ -121,22 +121,22 @@ pub const LIGHT: Palette = Palette {
     mark_bg: rgb(0xfff0a8),
     mark_fg: rgb(0x3a2e00),
     gutter: rgb(0x8a93a5),
-    line_hl: rgb(0xeaf0fc),
+    line_hl: rgb(0xe9eefb),
 };
 
 pub const DARK: Palette = Palette {
     dark: true,
-    bg: rgb(0x11131a),
-    surface: rgb(0x191c24),
-    surface_alt: rgb(0x232733),
-    hover: rgb(0x1f232d),
-    selected: rgb(0x1c2b4d),
-    line: rgb(0x2c313d),
-    text: rgb(0xe8ebf1),
-    text_2: rgb(0xc5cbd6),
-    muted: rgb(0x9aa3b4),
-    accent: rgb(0x8fb0ff),
-    on_accent: rgb(0x0b1530),
+    bg: rgb(0x12141c),
+    surface: rgb(0x1a1d28),
+    surface_alt: rgb(0x252936),
+    hover: rgb(0x232735),
+    selected: rgb(0x272f52),
+    line: rgb(0x2f3444),
+    text: rgb(0xe9ecf4),
+    text_2: rgb(0xc7cdda),
+    muted: rgb(0x9da6ba),
+    accent: rgb(0xa5b4fc),
+    on_accent: rgb(0x11152e),
     ok: rgb(0x62d49c),
     ok_soft: rgb(0x15281f),
     warn: rgb(0xf2a672),
@@ -148,7 +148,7 @@ pub const DARK: Palette = Palette {
     mark_bg: rgb(0x5c4a00),
     mark_fg: rgb(0xfff3c4),
     gutter: rgb(0x6d7689),
-    line_hl: rgb(0x242d44),
+    line_hl: rgb(0x272f4a),
 };
 
 pub fn palette(dark: bool) -> Palette {
@@ -159,15 +159,35 @@ pub fn palette(dark: bool) -> Palette {
 pub fn badge(ext: &str, dark: bool) -> (Color32, String) {
     let pick = |light: u32, dk: u32| rgb(if dark { dk } else { light });
     let color = match GROUPS.iter().position(|(_, exts)| exts.contains(&ext)) {
-        Some(0) => pick(0x2b579a, 0x3b68bd),
-        Some(1) => pick(0x1e7145, 0x267f50),
-        Some(2) => pick(0xb4400d, 0xb8501d),
-        Some(3) => pick(0xb91c1c, 0xc94242),
+        Some(0) => pick(0x2b5cb8, 0x4a7fd6),
+        Some(1) => pick(0x1f7a4d, 0x2e9160),
+        Some(2) => pick(0xc2410c, 0xd2642a),
+        Some(3) => pick(0xc62828, 0xd05555),
         Some(_) => pick(0x556075, 0x66718a),
         None => pick(0x667085, 0x66718a),
     };
     let label = if ext.is_empty() { "ФАЙЛ".to_string() } else { ext.to_uppercase() };
     (color, label)
+}
+
+/// Мягкая тень для карточек и поисковой строки: невысокий сдвиг вниз и широкое размытие.
+pub fn shadow(pal: &Palette) -> egui::Shadow {
+    egui::Shadow {
+        offset: [0, 6],
+        blur: 18,
+        spread: 0,
+        color: Color32::from_black_alpha(if pal.dark { 130 } else { 34 }),
+    }
+}
+
+/// Тень всплывающих окон и меню — легче обычной, чтобы не спорить с рамкой.
+pub fn popup_shadow(pal: &Palette) -> egui::Shadow {
+    egui::Shadow {
+        offset: [0, 4],
+        blur: 12,
+        spread: 0,
+        color: Color32::from_black_alpha(if pal.dark { 130 } else { 30 }),
+    }
 }
 
 // ------------------------------------------------------------------ шрифты и текст
@@ -243,7 +263,7 @@ pub fn apply(ctx: &Context, theme: Theme) {
             style.spacing.interact_size = vec2(CONTROL_H, CONTROL_H);
             style.spacing.combo_height = 320.0;
             style.spacing.menu_margin = egui::Margin::same(SPACE_XS as i8);
-            style.spacing.window_margin = egui::Margin::same(SPACE_LG as i8);
+            style.spacing.window_margin = egui::Margin::same(SPACE_XL as i8);
             style.spacing.scroll.bar_width = 8.0;
             // Выделяемые надписи перехватывали щелчки: по карточке результата не срабатывали двойной щелчок и меню.
             style.interaction.selectable_labels = false;
@@ -262,30 +282,30 @@ pub fn apply(ctx: &Context, theme: Theme) {
             v.error_fg_color = p.danger;
             v.selection.bg_fill = p.accent.gamma_multiply(if dark { 0.45 } else { 0.25 });
             v.selection.stroke = Stroke::new(LINE_W, p.accent);
-            v.window_shadow.color = Color32::from_black_alpha(if dark { 120 } else { 36 });
-            v.popup_shadow.color = Color32::from_black_alpha(if dark { 120 } else { 36 });
+            v.window_shadow = shadow(&p);
+            v.popup_shadow = popup_shadow(&p);
             let line = Stroke::new(LINE_W, p.line);
             // Единственная линия: ею рисуются и `ui.separator()`, и границы панелей.
             v.widgets.noninteractive.bg_stroke = line;
             v.widgets.noninteractive.bg_fill = p.surface;
             v.widgets.noninteractive.weak_bg_fill = p.surface;
-            v.widgets.noninteractive.fg_stroke = Stroke::new(1.0, p.text);
+            v.widgets.noninteractive.fg_stroke = Stroke::new(1.0_f32, p.text);
             v.widgets.inactive.bg_fill = p.surface_alt;
             v.widgets.inactive.weak_bg_fill = p.surface;
             v.widgets.inactive.bg_stroke = line;
-            v.widgets.inactive.fg_stroke = Stroke::new(1.0, p.text);
+            v.widgets.inactive.fg_stroke = Stroke::new(1.0_f32, p.text);
             v.widgets.hovered.bg_fill = p.surface_alt;
             v.widgets.hovered.weak_bg_fill = p.surface_alt;
             v.widgets.hovered.bg_stroke = Stroke::new(LINE_W, p.accent);
-            v.widgets.hovered.fg_stroke = Stroke::new(1.0, p.text);
+            v.widgets.hovered.fg_stroke = Stroke::new(1.0_f32, p.text);
             v.widgets.active.bg_fill = p.selected;
             v.widgets.active.weak_bg_fill = p.selected;
             v.widgets.active.bg_stroke = Stroke::new(LINE_W, p.accent);
-            v.widgets.active.fg_stroke = Stroke::new(1.0, p.text);
+            v.widgets.active.fg_stroke = Stroke::new(1.0_f32, p.text);
             v.widgets.open.bg_fill = p.surface_alt;
             v.widgets.open.weak_bg_fill = p.surface_alt;
             v.widgets.open.bg_stroke = line;
-            v.widgets.open.fg_stroke = Stroke::new(1.0, p.text);
+            v.widgets.open.fg_stroke = Stroke::new(1.0_f32, p.text);
             for w in [
                 &mut v.widgets.noninteractive,
                 &mut v.widgets.inactive,
@@ -343,10 +363,13 @@ pub fn primary_button(ui: &mut Ui, pal: &Palette, text: &str) -> Response {
     )
 }
 
-/// Обычная кнопка.
+/// Обычная кнопка: приглушённая заливка, не спорит с главной.
 pub fn button(ui: &mut Ui, pal: &Palette, text: &str) -> Response {
     ui.add(
-        egui::Button::new(button_text(text, pal.text)).corner_radius(radius(RADIUS_SM)).min_size(vec2(0.0, CONTROL_H)),
+        egui::Button::new(button_text(text, pal.text))
+            .fill(pal.surface_alt)
+            .corner_radius(radius(RADIUS_SM))
+            .min_size(vec2(0.0, CONTROL_H)),
     )
 }
 
@@ -371,16 +394,12 @@ pub fn danger_button(ui: &mut Ui, pal: &Palette, text: &str) -> Response {
     )
 }
 
-/// Кнопка-«таблетка» фильтра или переключатель вида: выбранная окрашена акцентом.
+/// Кнопка-«таблетка» фильтра или переключатель вида: включённая залита акцентом, выключенная без рамки.
 pub fn pill(ui: &mut Ui, pal: &Palette, text: &str, on: bool) -> Response {
-    let (fill, fg, line) = if on { (pal.selected, pal.accent, pal.accent) } else { (pal.surface, pal.text, pal.line) };
-    ui.add(
-        egui::Button::new(button_text(text, fg))
-            .fill(fill)
-            .stroke(Stroke::new(LINE_W, line))
-            .corner_radius(radius(RADIUS_LG))
-            .min_size(vec2(0.0, CONTROL_H)),
-    )
+    let btn = egui::Button::new(button_text(text, if on { pal.on_accent } else { pal.muted }))
+        .corner_radius(radius(RADIUS_LG))
+        .min_size(vec2(0.0, CONTROL_H));
+    if on { ui.add(btn.fill(pal.accent).stroke(Stroke::NONE)) } else { ui.add(btn.frame(false)) }
 }
 
 /// Выключатель «вкл/выкл».
@@ -402,7 +421,12 @@ pub fn toggle(ui: &mut Ui, pal: &Palette, on: &mut bool) -> Response {
         let knob = if pal.dark && *on { pal.on_accent } else { Color32::WHITE };
         painter.circle_filled(egui::pos2(knob_x, rect.center().y), 9.0, knob);
         if response.has_focus() {
-            painter.rect_stroke(rect.expand(2.0), radius(14), Stroke::new(2.0, pal.accent), egui::StrokeKind::Outside);
+            painter.rect_stroke(
+                rect.expand(2.0),
+                radius(14),
+                Stroke::new(2.0_f32, pal.accent),
+                egui::StrokeKind::Outside,
+            );
         }
     }
     response.on_hover_cursor(egui::CursorIcon::PointingHand)
@@ -435,7 +459,7 @@ pub fn chip(ui: &mut Ui, text: &str, color: Color32, bg: Color32) {
 /// Значок типа файла: цветная плитка с расширением.
 pub fn file_tile(ui: &mut Ui, label: &str, color: Color32, size: f32) {
     let (rect, _) = ui.allocate_exact_size(vec2(size, size), Sense::hover());
-    ui.painter().rect_filled(rect, radius(RADIUS_SM), color);
+    ui.painter().rect_filled(rect, radius(RADIUS_MD), color);
     let text: String = label.chars().take(4).collect();
     let galley = ui.painter().layout_no_wrap(text, font(FONT_CAPTION), Color32::WHITE);
     ui.painter().galley(rect.center() - galley.size() / 2.0, galley, Color32::WHITE);
@@ -450,12 +474,63 @@ pub fn keycap(ui: &mut Ui, pal: &Palette, text: &str) {
     ui.painter().galley(rect.center() - galley.size() / 2.0, galley, pal.text);
 }
 
-/// Рисованные значки для пустых состояний: в системных шрифтах нужных символов может не оказаться.
+/// Рисованные значки для пустых состояний и кнопок: в системных шрифтах нужных символов может не оказаться.
 #[derive(Clone, Copy)]
 pub enum Icon {
     Search,
     Folder,
     Warning,
+    /// Шестерёнка: настройки.
+    Gear,
+}
+
+/// Рисует кистью значок размером для кнопки 34×34.
+fn draw_icon(painter: &egui::Painter, icon: Icon, c: egui::Pos2, color: Color32) {
+    let stroke = Stroke::new(1.8_f32, color);
+    match icon {
+        Icon::Search => {
+            let lens = c - vec2(2.0, 2.0);
+            painter.circle_stroke(lens, 7.0, stroke);
+            painter.line_segment([lens + vec2(5.0, 5.0), lens + vec2(10.5, 10.5)], stroke);
+        }
+        Icon::Folder => {
+            let body = egui::Rect::from_center_size(c + vec2(0.0, 1.5), vec2(20.0, 14.0));
+            painter.rect_stroke(body, radius(3), stroke, egui::StrokeKind::Middle);
+            painter.line_segment([body.left_top() + vec2(0.0, -1.0), body.left_top() + vec2(7.0, -1.0)], stroke);
+        }
+        Icon::Warning => {
+            let top = c + vec2(0.0, -10.0);
+            let (l, r) = (c + vec2(-11.0, 9.0), c + vec2(11.0, 9.0));
+            painter.add(egui::Shape::closed_line(vec![top, r, l], stroke));
+            painter.line_segment([c + vec2(0.0, -3.0), c + vec2(0.0, 2.5)], stroke);
+            painter.circle_filled(c + vec2(0.0, 5.5), 1.4, color);
+        }
+        Icon::Gear => {
+            painter.circle_stroke(c, 6.5, stroke);
+            painter.circle_filled(c, 2.0, color);
+            for k in 0..8 {
+                let a = k as f32 * std::f32::consts::TAU / 8.0;
+                let dir = vec2(a.cos(), a.sin());
+                painter.line_segment([c + dir * 9.0, c + dir * 12.0], stroke);
+            }
+        }
+    }
+}
+
+/// Квадратная кнопка 34×34 с нарисованной кистью иконкой: настройки, папка, фильтры.
+/// `title` показывается во всплывающей подсказке и передаётся экранным дикторам.
+pub fn icon_button(ui: &mut Ui, pal: &Palette, icon: Icon, title: &str) -> Response {
+    let (rect, response) = ui.allocate_exact_size(vec2(34.0, 34.0), Sense::click());
+    response.widget_info(|| egui::WidgetInfo::labeled(egui::WidgetType::Button, ui.is_enabled(), title));
+    if ui.is_rect_visible(rect) {
+        let painter = ui.painter();
+        let fill = if response.hovered() { pal.hover } else { pal.surface_alt };
+        painter.rect_filled(rect, radius(RADIUS_SM), fill);
+        painter.rect_stroke(rect, radius(RADIUS_SM), Stroke::new(LINE_W, pal.line), egui::StrokeKind::Inside);
+        let color = if response.hovered() { pal.accent } else { pal.text_2 };
+        draw_icon(painter, icon, rect.center(), color);
+    }
+    response.on_hover_text(title).on_hover_cursor(egui::CursorIcon::PointingHand)
 }
 
 /// Крупный значок в круге.
@@ -468,7 +543,7 @@ pub fn icon_badge(ui: &mut Ui, pal: &Palette, icon: Icon) {
     };
     let painter = ui.painter();
     painter.circle_filled(rect.center(), size / 2.0, bg);
-    let stroke = Stroke::new(3.0, fg);
+    let stroke = Stroke::new(3.0_f32, fg);
     let c = rect.center();
     match icon {
         Icon::Search => {
@@ -488,6 +563,8 @@ pub fn icon_badge(ui: &mut Ui, pal: &Palette, icon: Icon) {
             painter.line_segment([c + vec2(0.0, -4.0), c + vec2(0.0, 3.0)], stroke);
             painter.circle_filled(c + vec2(0.0, 7.5), 1.8, fg);
         }
+        // Gear в крупном значке не нужен — оставляем круг с фоном.
+        Icon::Gear => {}
     }
 }
 
@@ -499,7 +576,7 @@ pub fn close_button(ui: &mut Ui, pal: &Palette) -> Response {
     }
     let color = if response.hovered() { pal.text } else { pal.muted };
     let c = rect.center();
-    let stroke = Stroke::new(1.8, color);
+    let stroke = Stroke::new(1.8_f32, color);
     ui.painter().line_segment([c + vec2(-5.0, -5.0), c + vec2(5.0, 5.0)], stroke);
     ui.painter().line_segment([c + vec2(-5.0, 5.0), c + vec2(5.0, -5.0)], stroke);
     response.on_hover_cursor(egui::CursorIcon::PointingHand)
@@ -512,7 +589,7 @@ pub fn kind_icon(ui: &mut Ui, pal: &Palette, kind: Kind) {
     let c = rect.center();
     let painter = ui.painter();
     painter.circle_filled(c, 11.0, color);
-    let stroke = Stroke::new(2.0, if pal.dark { pal.on_accent } else { Color32::WHITE });
+    let stroke = Stroke::new(2.0_f32, if pal.dark { pal.on_accent } else { Color32::WHITE });
     match kind {
         Kind::Success => {
             painter.line_segment([c + vec2(-4.5, 0.5), c + vec2(-1.5, 3.5)], stroke);
@@ -561,12 +638,13 @@ pub fn confirm_row(ui: &mut Ui, pal: &Palette, question: &str, yes: &str) -> Opt
     answer
 }
 
-/// Карточка: поверхность с рамкой и скруглением.
+/// Карточка: поверхность с рамкой, скруглением и мягкой тенью.
 pub fn card_frame(pal: &Palette) -> egui::Frame {
     egui::Frame::new()
         .fill(pal.surface)
         .stroke(Stroke::new(LINE_W, pal.line))
         .corner_radius(radius(RADIUS_MD))
+        .shadow(shadow(pal))
         .inner_margin(egui::Margin::same(SPACE_LG as i8))
 }
 

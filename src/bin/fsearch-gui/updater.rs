@@ -89,7 +89,10 @@ impl Updater {
         self.phase = Phase::Checking;
         let (tx, ctx) = (self.tx.clone(), self.ctx.clone());
         thread::spawn(move || {
-            let result = Client::new().check().map_err(|e| format!("{e:#}"));
+            // Паника (например, внутри ureq) не должна оставлять окно вечно в фазе Checking: busy снимется
+            // только по сообщению, поэтому превращаем обрыв потока в обычную неудачу.
+            let result = std::panic::catch_unwind(|| Client::new().check().map_err(|e| format!("{e:#}")))
+                .unwrap_or_else(|_| Err("внутренняя ошибка при проверке обновления".to_string()));
             let _ = tx.send(Msg::Checked { result, manual });
             ctx.request_repaint();
         });
@@ -119,7 +122,10 @@ impl Updater {
                     ctx.request_repaint();
                 }
             };
-            let result = Client::new().download_update(&release, &progress).map_err(|e| format!("{e:#}"));
+            let result = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
+                Client::new().download_update(&release, &progress).map_err(|e| format!("{e:#}"))
+            }))
+            .unwrap_or_else(|_| Err("внутренняя ошибка при загрузке обновления".to_string()));
             let _ = tx.send(Msg::Downloaded(result));
             ctx.request_repaint();
         });

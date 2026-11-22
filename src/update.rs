@@ -145,10 +145,19 @@ impl Client {
 
     /// Клиент с другим адресом API (для проверок на локальном сервере).
     pub fn with_base(api_base: &str) -> Client {
+        // ureq не выбирает провайдера TLS по включённым возможностям: по умолчанию всегда Rustls.
+        // В сборках с native-tls (Windows, macOS — см. Cargo.toml) запрос без явной настройки падает с паникой
+        // «provider is Rustls but feature is not enabled: rustls». Делаем выбор таким же, как зависимости.
+        let provider = if cfg!(any(windows, target_os = "macos")) {
+            ureq::tls::TlsProvider::NativeTls
+        } else {
+            ureq::tls::TlsProvider::Rustls
+        };
         let config = ureq::Agent::config_builder()
             .user_agent(format!("fsearch/{} (+https://github.com/{REPO})", env!("CARGO_PKG_VERSION")))
             .timeout_connect(Some(Duration::from_secs(10)))
             .timeout_recv_response(Some(Duration::from_secs(20)))
+            .tls_config(ureq::tls::TlsConfig::builder().provider(provider).build())
             .build();
         Client { api_base: api_base.trim_end_matches('/').to_string(), agent: config.into() }
     }
@@ -351,6 +360,18 @@ mod tests {
     use std::net::TcpListener;
     use std::sync::Arc;
     use std::thread;
+
+    /// Провайдер TLS в агенте совпадает с возможностями сборки: иначе https-запрос падает с паникой внутри ureq
+    /// (так и случилось на Windows, когда агент молча оставался с провайдером Rustls без feature).
+    #[test]
+    fn tls_provider_matches_build() {
+        let expected = if cfg!(any(windows, target_os = "macos")) {
+            ureq::tls::TlsProvider::NativeTls
+        } else {
+            ureq::tls::TlsProvider::Rustls
+        };
+        assert_eq!(Client::new().agent.config().tls_config().provider(), expected);
+    }
 
     #[test]
     fn versions_parse_and_compare() {

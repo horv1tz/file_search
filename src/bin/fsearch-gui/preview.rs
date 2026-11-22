@@ -219,6 +219,9 @@ fn doc_view(ui: &mut Ui, doc: &mut Doc, terms: &[String], pal: &Palette) {
                 let n = doc.matches.len();
                 let arrow = |t: &str| {
                     egui::Button::new(RichText::new(t).size(theme::FONT_BODY).color(pal.text))
+                        .fill(pal.surface_alt)
+                        .stroke(egui::Stroke::new(theme::LINE_W, pal.line))
+                        .corner_radius(theme::radius(RADIUS_SM))
                         .min_size(vec2(CONTROL_H, CONTROL_H))
                 };
                 if ui.add(arrow("▶")).on_hover_text("Следующее совпадение (F3)").clicked() {
@@ -260,10 +263,12 @@ fn doc_view(ui: &mut Ui, doc: &mut Doc, terms: &[String], pal: &Palette) {
         // Совпадение показываем чуть ниже верхнего края, чтобы были видны строки перед ним.
         scroll = scroll.vertical_scroll_offset((line as f32 - 3.0).max(0.0) * row_height);
     }
+    // Текст — в рамке карточки: поверхность, скругление и отступы по дизайн-системе.
     egui::Frame::new()
         .fill(editor_bg)
         .stroke(egui::Stroke::new(theme::LINE_W, pal.line))
-        .corner_radius(theme::radius(RADIUS_SM))
+        .corner_radius(theme::radius(theme::RADIUS_MD))
+        .inner_margin(egui::Margin::symmetric(SPACE_XS as i8, SPACE_XS as i8))
         .show(ui, |ui| {
             scroll.show_rows(ui, row_height, doc.lines.len(), |ui, rows| {
                 ui.spacing_mut().item_spacing.y = 0.0;

@@ -245,6 +245,8 @@ pub struct App {
     /// Отметка для оценки оставшегося времени: (когда, сколько было готово).
     index_mark: Option<(Instant, u64)>,
     pub index_eta_secs: Option<u64>,
+    /// Проверка стартовой геометрии окна выполнена один раз (см. update).
+    window_rescued: bool,
 
     screenshot: Option<ScreenshotPlan>,
 }
@@ -392,6 +394,7 @@ impl App {
             index_was_running: false,
             index_mark: None,
             index_eta_secs: None,
+            window_rescued: false,
             screenshot: launch.screenshot.map(|path| ScreenshotPlan {
                 path,
                 requested: false,
@@ -1133,15 +1136,20 @@ impl App {
             })
         });
         if let Some(image) = shot {
-            let path = plan.path.clone();
-            let _ = image::save_buffer(
-                &path,
-                image.as_raw(),
-                image.width() as u32,
-                image.height() as u32,
-                image::ColorType::Rgba8,
-            );
-            ctx.send_viewport_cmd(egui::ViewportCommand::Close);
+            if image.width() < 200 || image.height() < 200 {
+                // Снимок попал на кадр до показа окна (буфер ещё крошечный): пробуем на следующем кадре.
+                plan.requested = false;
+            } else {
+                let path = plan.path.clone();
+                let _ = image::save_buffer(
+                    &path,
+                    image.as_raw(),
+                    image.width() as u32,
+                    image.height() as u32,
+                    image::ColorType::Rgba8,
+                );
+                ctx.send_viewport_cmd(egui::ViewportCommand::Close);
+            }
         }
         ctx.request_repaint_after(Duration::from_millis(200));
     }
@@ -1149,6 +1157,16 @@ impl App {
 
 impl eframe::App for App {
     fn update(&mut self, ctx: &Context, _frame: &mut eframe::Frame) {
+        // Спасение невидимого окна: если прошлый сеанс сохранился в свёрнутом виде (Windows пишет позицию
+        // −32000 и размер 0×0), приложение запускалось с окном, которое не показать. Возвращаем разумный размер.
+        // Проверяем один раз, на первом кадре: дальше сворачивание пользователя не трогаем.
+        if !self.window_rescued {
+            self.window_rescued = true;
+            let rect = ctx.content_rect();
+            if rect.width() < 200.0 || rect.height() < 200.0 {
+                ctx.send_viewport_cmd(egui::ViewportCommand::InnerSize(egui::vec2(1040.0, 680.0)));
+            }
+        }
         self.poll(ctx);
         // Тема применяется сразу при выборе, не дожидаясь «Применить» (которое перезапускает индексацию).
         if self.settings.theme != self.applied_theme {

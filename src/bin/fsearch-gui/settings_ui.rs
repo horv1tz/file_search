@@ -150,11 +150,12 @@ fn tab_title(ui: &mut Ui, pal: &Palette, title: &str, hint: &str) {
     if !hint.is_empty() {
         ui.add(egui::Label::new(theme::small(pal, hint)).wrap());
     }
-    ui.add_space(SPACE_SM);
+    ui.add_space(SPACE_MD);
 }
 
 fn section(ui: &mut Ui, pal: &Palette, title: &str) {
-    ui.add_space(SPACE_MD);
+    // Разделы отделяем воздухом, а не линиями: крупный просвет по шкале отступов.
+    ui.add_space(SPACE_XL);
     ui.label(theme::heading(pal, title));
     ui.add_space(SPACE_XS);
 }

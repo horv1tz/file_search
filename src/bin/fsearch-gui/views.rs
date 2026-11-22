@@ -193,7 +193,7 @@ fn update_banner(ui: &mut Ui, app: &mut App, pal: &Palette, actions: &mut Vec<Ac
 fn magnifier(ui: &mut Ui, color: Color32) {
     let (rect, _) = ui.allocate_exact_size(vec2(22.0, 22.0), Sense::hover());
     let painter = ui.painter();
-    let stroke = Stroke::new(2.0, color);
+    let stroke = Stroke::new(2.0_f32, color);
     let center = rect.center() - vec2(2.0, 2.0);
     painter.circle_stroke(center, 6.5, stroke);
     painter.line_segment([center + vec2(4.7, 4.7), center + vec2(9.5, 9.5)], stroke);
@@ -228,16 +228,18 @@ fn header(ui: &mut Ui, app: &mut App, pal: &Palette, actions: &mut Vec<Action>) 
     let search_id = Id::new(SEARCH_ID);
     let focused = ui.ctx().memory(|m| m.has_focus(search_id));
     ui.horizontal(|ui| {
-        let settings_width = 116.0;
-        let box_width = (ui.available_width() - settings_width - SPACE_MD).max(220.0);
+        let side = CONTROL_H + SPACE_SM;
+        let box_width = (ui.available_width() - side).max(220.0);
+        // Поисковая строка — центральный элемент: карточка на поверхности с мягкой тенью.
         Frame::new()
             .fill(pal.surface)
-            .stroke(Stroke::new(if focused { 2.0 } else { LINE_W }, if focused { pal.accent } else { pal.line }))
+            .stroke(Stroke::new(LINE_W + 0.5, if focused { pal.accent } else { pal.line }))
             .corner_radius(theme::radius(RADIUS_LG))
-            .inner_margin(Margin::symmetric(SPACE_MD as i8, 5))
+            .shadow(theme::shadow(pal))
+            .inner_margin(Margin::symmetric(SPACE_MD as i8, SPACE_SM as i8))
             .show(ui, |ui| {
-                ui.set_width(box_width - 2.0 * SPACE_MD - 4.0);
-                ui.set_min_height(SEARCH_H - 10.0 - 4.0);
+                ui.set_width(box_width - 2.0 * SPACE_MD - 3.0);
+                ui.set_min_height(SEARCH_H - 2.0 * SPACE_SM);
                 ui.horizontal_centered(|ui| {
                     magnifier(ui, if focused { pal.accent } else { pal.muted });
                     let side = CONTROL_H + SPACE_XS;
@@ -285,8 +287,7 @@ fn header(ui: &mut Ui, app: &mut App, pal: &Palette, actions: &mut Vec<Action>) 
                     }
                 });
             });
-        if theme::button(ui, pal, "Настройки").on_hover_text("Папки для поиска, индексация, тема").clicked()
-        {
+        if theme::icon_button(ui, pal, Icon::Gear, "Настройки").clicked() {
             actions.push(Action::OpenSettings);
         }
     });
@@ -338,16 +339,22 @@ fn filter_pills(ui: &mut Ui, app: &mut App, pal: &Palette, changed: &mut bool) {
 
 /// Режим поиска, порядок и папка.
 fn filter_controls(ui: &mut Ui, app: &mut App, pal: &Palette, actions: &mut Vec<Action>, changed: &mut bool) {
-    ComboBox::from_id_salt("mode").width(150.0).selected_text(mode_label(app.form.mode)).show_ui(ui, |ui| {
-        for m in [Mode::All, Mode::Name, Mode::Content] {
-            *changed |= ui.selectable_value(&mut app.form.mode, m, mode_label(m)).changed();
-        }
-    });
-    ComboBox::from_id_salt("sort").width(170.0).selected_text(sort_label(app.form.sort)).show_ui(ui, |ui| {
-        for s in [Sort::Relevance, Sort::Newest, Sort::Oldest, Sort::Largest, Sort::Smallest] {
-            *changed |= ui.selectable_value(&mut app.form.sort, s, sort_label(s)).changed();
-        }
-    });
+    ComboBox::from_id_salt("mode").width(150.0).height(CONTROL_H).selected_text(mode_label(app.form.mode)).show_ui(
+        ui,
+        |ui| {
+            for m in [Mode::All, Mode::Name, Mode::Content] {
+                *changed |= ui.selectable_value(&mut app.form.mode, m, mode_label(m)).changed();
+            }
+        },
+    );
+    ComboBox::from_id_salt("sort").width(170.0).height(CONTROL_H).selected_text(sort_label(app.form.sort)).show_ui(
+        ui,
+        |ui| {
+            for s in [Sort::Relevance, Sort::Newest, Sort::Oldest, Sort::Largest, Sort::Smallest] {
+                *changed |= ui.selectable_value(&mut app.form.sort, s, sort_label(s)).changed();
+            }
+        },
+    );
     match &app.form.dir {
         Some(dir) => {
             let name = std::path::Path::new(dir)
@@ -418,76 +425,68 @@ fn status_dot(ui: &mut Ui, color: Color32) {
 }
 
 fn status_bar(ui: &mut Ui, app: &App, pal: &Palette, actions: &mut Vec<Action>) {
-    ui.horizontal(|ui| {
-        ui.set_min_height(24.0);
-        let (left, left_color) = if app.search_error.is_some() && !app.form.is_empty() {
-            ("Ошибка поиска".to_string(), pal.danger)
-        } else if app.num_docs > 0 {
-            (format!("Файлов в индексе: {}", thousands(app.num_docs)), pal.muted)
-        } else {
-            (String::new(), pal.muted)
-        };
-        ui.label(RichText::new(left).size(FONT_CAPTION).color(left_color));
-
-        ui.with_layout(Layout::right_to_left(Align::Center), |ui| {
-            let Some(backend) = &app.backend else { return };
+    // Тонкая линия сверху отделяет строку состояния от списка результатов.
+    theme::separator(ui, pal);
+    let row = ui.horizontal(|ui| {
+        ui.set_min_height(CONTROL_H - SPACE_SM);
+        let caption = |text: String, color: Color32| RichText::new(text).size(FONT_CAPTION).color(color);
+        // Слева — статус индексации: точка-индикатор и подпись.
+        if let Some(backend) = &app.backend {
             let st = &backend.state;
-            let caption = |text: String, color: Color32| RichText::new(text).size(FONT_CAPTION).color(color);
-            if let Some(error) = st.error.lock().unwrap().as_ref() {
-                ui.label(caption(format!("Внимание: {}", shorten(error, 50)), pal.warn)).on_hover_text(error.as_str());
-            }
-            let response = if st.running.load(Ordering::Relaxed) {
+            if st.running.load(Ordering::Relaxed) {
+                status_dot(ui, pal.accent);
                 let total = st.total.load(Ordering::Relaxed);
                 let done = st.done.load(Ordering::Relaxed);
                 let phase = st.phase();
-                ui.horizontal(|ui| {
-                    if total > 0 && phase == "Индексация" {
-                        let frac = (done as f32 / total as f32).clamp(0.0, 1.0);
-                        let eta = match app.index_eta_secs {
-                            Some(secs) if secs >= 90 => format!(" · осталось ~{} мин", secs.div_ceil(60)),
-                            Some(_) => " · почти готово".to_string(),
-                            None => String::new(),
-                        };
-                        ui.label(caption(
-                            format!("Индексация {}\u{a0}%{eta}", (frac * 100.0).floor() as u32),
-                            pal.accent,
-                        ))
-                        .on_hover_text(format!(
-                            "Прочитано файлов: {} из {}",
-                            thousands(done),
-                            thousands(total)
-                        ));
-                        theme::progress(ui, pal, frac, 120.0);
-                    } else {
-                        let scanned = st.scanned.load(Ordering::Relaxed);
-                        let text = match (phase.is_empty(), scanned) {
-                            (true, _) => "Индексация…".to_string(),
-                            (false, 0) => phase,
-                            (false, n) => format!("{phase} · найдено файлов: {}", thousands(n)),
-                        };
-                        ui.label(caption(text, pal.accent));
-                        ui.add(egui::Spinner::new().size(14.0));
-                    }
-                })
-                .response
+                if total > 0 && phase == "Индексация" {
+                    let frac = (done as f32 / total as f32).clamp(0.0, 1.0);
+                    let eta = match app.index_eta_secs {
+                        Some(secs) if secs >= 90 => format!(" · осталось ~{} мин", secs.div_ceil(60)),
+                        Some(_) => " · почти готово".to_string(),
+                        None => String::new(),
+                    };
+                    ui.label(caption(format!("Индексация {}\u{a0}%{eta}", (frac * 100.0).floor() as u32), pal.accent))
+                        .on_hover_text(format!("Прочитано файлов: {} из {}", thousands(done), thousands(total)));
+                    theme::progress(ui, pal, frac, 120.0);
+                } else {
+                    let scanned = st.scanned.load(Ordering::Relaxed);
+                    let text = match (phase.is_empty(), scanned) {
+                        (true, _) => "Индексация…".to_string(),
+                        (false, 0) => phase,
+                        (false, n) => format!("{phase} · найдено файлов: {}", thousands(n)),
+                    };
+                    ui.label(caption(text, pal.accent));
+                    ui.add(egui::Spinner::new().size(14.0));
+                }
             } else if st.watching.load(Ordering::Relaxed) {
-                ui.horizontal(|ui| {
-                    ui.label(caption("Слежение включено".to_string(), pal.ok))
-                        .on_hover_text("Изменения на диске попадают в поиск сами");
-                    status_dot(ui, pal.ok);
-                })
-                .response
+                status_dot(ui, pal.ok);
+                ui.label(caption("Слежение включено".to_string(), pal.ok))
+                    .on_hover_text("Изменения на диске попадают в поиск сами");
             } else if app.settings.roots.is_empty() {
-                ui.label(caption("Папки не выбраны".to_string(), pal.warn))
+                status_dot(ui, pal.warn);
+                ui.label(caption("Папки не выбраны".to_string(), pal.warn));
             } else {
-                ui.label(caption("Слежение выключено".to_string(), pal.muted))
-            };
-            if response.interact(Sense::click()).on_hover_text("Открыть настройки индексации").clicked()
-            {
-                actions.push(Action::OpenSettings);
+                status_dot(ui, pal.muted);
+                ui.label(caption("Слежение выключено".to_string(), pal.muted));
+            }
+            if let Some(error) = st.error.lock().unwrap().as_ref() {
+                ui.label(caption(format!("Внимание: {}", shorten(error, 50)), pal.warn)).on_hover_text(error.as_str());
+            }
+        }
+        // Справа — количество файлов и ошибка поиска.
+        ui.with_layout(Layout::right_to_left(Align::Center), |ui| {
+            if app.search_error.is_some() && !app.form.is_empty() {
+                ui.label(caption("Ошибка поиска".to_string(), pal.danger));
+            }
+            if app.num_docs > 0 {
+                ui.label(caption(format!("Файлов в индексе: {}", thousands(app.num_docs)), pal.muted));
             }
         });
     });
+    if row.response.interact(Sense::click()).on_hover_text("Открыть настройки индексации").clicked()
+    {
+        actions.push(Action::OpenSettings);
+    }
 }
 
 // ------------------------------------------------------------------ центральная область
@@ -702,23 +701,7 @@ fn hit_row(
                 theme::file_tile(ui, &label, color, 40.0);
                 ui.vertical(|ui| {
                     ui.spacing_mut().item_spacing.y = SPACE_XS;
-                    ui.horizontal(|ui| {
-                        let meta = format!("{} · {}", format_size(hit.size), format_time(hit.modified_ms));
-                        // Правую часть (размер и дата) резервируем заранее, иначе длинное имя наезжает на неё.
-                        let meta_width =
-                            ui.painter().layout_no_wrap(meta.clone(), theme::font(FONT_CAPTION), pal.muted).size().x;
-                        let name_width = (ui.available_width() - meta_width - SPACE_LG).max(80.0);
-                        ui.scope(|ui| {
-                            ui.set_max_width(name_width);
-                            ui.add(egui::Label::new(theme::heading(pal, &hit.name)).truncate());
-                        });
-                        ui.with_layout(Layout::right_to_left(Align::Center), |ui| {
-                            ui.label(theme::caption(pal, meta));
-                        });
-                    });
-                    let folder =
-                        fit_path(ui, &parent_of(&hit.path), ui.available_width(), theme::font(FONT_CAPTION), pal.muted);
-                    ui.add(egui::Label::new(theme::caption(pal, folder)).truncate()).on_hover_text(&hit.path);
+                    ui.add(egui::Label::new(theme::heading(pal, &hit.name)).truncate());
                     if let Some(note) = status_note(&hit.status) {
                         ui.label(RichText::new(note).size(FONT_CAPTION).color(pal.warn));
                     }
@@ -733,6 +716,24 @@ fn hit_row(
                             ui.add(egui::Label::new(snippet_job(snippet, pal, width)).wrap());
                         });
                     }
+                    // Мета-строка снизу карточки: путь слева, размер и дата справа.
+                    ui.add_space(SPACE_XS);
+                    ui.horizontal(|ui| {
+                        let meta = format!("{} · {}", format_size(hit.size), format_time(hit.modified_ms));
+                        // Правую часть (размер и дата) резервируем заранее, иначе длинный путь наезжает на неё.
+                        let meta_width =
+                            ui.painter().layout_no_wrap(meta.clone(), theme::font(FONT_CAPTION), pal.muted).size().x;
+                        let path_width = (ui.available_width() - meta_width - SPACE_LG).max(80.0);
+                        let folder =
+                            fit_path(ui, &parent_of(&hit.path), path_width, theme::font(FONT_CAPTION), pal.muted);
+                        ui.scope(|ui| {
+                            ui.set_max_width(path_width);
+                            ui.add(egui::Label::new(theme::caption(pal, folder)).truncate()).on_hover_text(&hit.path);
+                        });
+                        ui.with_layout(Layout::right_to_left(Align::Center), |ui| {
+                            ui.label(theme::caption(pal, meta));
+                        });
+                    });
                     if with_buttons && selected {
                         // Узкое окно: панели справа нет, поэтому действия — прямо на карточке.
                         ui.add_space(SPACE_XS);
@@ -777,15 +778,16 @@ fn hit_row(
     } else {
         pal.surface
     };
-    let stroke = if selected {
-        Stroke::new(LINE_W + 0.5, pal.accent)
-    } else if response.hovered() {
-        Stroke::new(LINE_W, pal.muted.gamma_multiply(0.5))
-    } else {
-        Stroke::new(LINE_W, pal.line)
-    };
     ui.painter().set(background, Shape::rect_filled(rect, theme::radius(RADIUS_MD), fill));
-    ui.painter().rect_stroke(rect, theme::radius(RADIUS_MD), stroke, StrokeKind::Inside);
+    ui.painter().rect_stroke(rect, theme::radius(RADIUS_MD), Stroke::new(LINE_W, pal.line), StrokeKind::Inside);
+    if selected {
+        // Тонкий акцентный край слева отмечает выбранную карточку.
+        let x = rect.left() + LINE_W + 1.0;
+        ui.painter().line_segment(
+            [pos2(x, rect.top() + RADIUS_SM as f32), pos2(x, rect.bottom() - RADIUS_SM as f32)],
+            Stroke::new(3.0_f32, pal.accent),
+        );
+    }
 
     if response.double_clicked() {
         actions.push(Action::Open(index));
@@ -852,7 +854,10 @@ fn details_panel(ui: &mut Ui, app: &mut App, pal: &Palette, actions: &mut Vec<Ac
                 });
             ui.add_space(SPACE_SM);
         }
-        ui.with_layout(Layout::top_down_justified(Align::Min), |ui| {
+        ui.add_space(SPACE_XS);
+        // Действия — компактным рядом, а не колонной на всю ширину панели.
+        ui.horizontal_wrapped(|ui| {
+            ui.spacing_mut().item_spacing.x = SPACE_SM;
             let openable = is_safe_to_open(std::path::Path::new(&hit.path));
             if ui
                 .add_enabled_ui(openable, |ui| theme::primary_button(ui, pal, "Открыть"))
@@ -869,7 +874,10 @@ fn details_panel(ui: &mut Ui, app: &mut App, pal: &Palette, actions: &mut Vec<Ac
             if theme::button(ui, pal, "Копировать путь").on_hover_text("Ctrl+C").clicked() {
                 actions.push(Action::CopyPath(index));
             }
-            if theme::button(ui, pal, "Искать только в этой папке").clicked() {
+            if theme::button(ui, pal, "Искать только в этой папке")
+                .on_hover_text("Искать только среди файлов этой папки")
+                .clicked()
+            {
                 actions.push(Action::SearchInFolder(index));
             }
         });
@@ -1103,20 +1111,15 @@ fn welcome(ui: &mut Ui, app: &App, pal: &Palette, actions: &mut Vec<Action>) {
             ui.label(theme::heading(pal, "Примеры запросов"));
             ui.label(theme::caption(pal, "Нажмите на пример, чтобы попробовать"));
             ui.add_space(SPACE_XS);
-            let columns = if ui.available_width() >= 520.0 { 2 } else { 1 };
-            egui::Grid::new("examples").num_columns(columns * 2).spacing([SPACE_LG, SPACE_SM]).show(ui, |ui| {
-                for (n, (code, description)) in EXAMPLES.iter().enumerate() {
-                    let button =
-                        egui::Button::new(RichText::new(*code).monospace().size(theme::FONT_MONO).color(pal.accent))
-                            .fill(pal.surface_alt)
-                            .corner_radius(theme::radius(RADIUS_SM))
-                            .min_size(vec2(0.0, CONTROL_H));
-                    if ui.add(button).clicked() {
+            // Примеры — кликабельные таблетки: запрос подставляется в строку поиска, смысл — в подсказке.
+            ui.horizontal_wrapped(|ui| {
+                ui.spacing_mut().item_spacing = vec2(SPACE_XS, SPACE_XS);
+                for (code, description) in EXAMPLES.iter() {
+                    if theme::pill(ui, pal, code, false)
+                        .on_hover_text(format!("{description}\nНажмите, чтобы выполнить этот запрос"))
+                        .clicked()
+                    {
                         actions.push(Action::UseQuery(code.to_string()));
-                    }
-                    ui.label(theme::caption(pal, *description));
-                    if (n + 1) % columns == 0 {
-                        ui.end_row();
                     }
                 }
             });
